@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import type { StackScreenProps } from '@react-navigation/stack';
 import { useShallow } from 'zustand/react/shallow';
@@ -6,9 +6,12 @@ import type { GameParamList } from '../navigation/types';
 import { useGameStore } from '../store/gameStore';
 import type { Castaway } from '../data/roster';
 import { PLAYER_ID } from '../utils/voteSimulator';
-import { seeded } from '../utils/seeded';
 import { initials } from '../data/roster';
-import HoldGame from '../minigames/HoldGame';
+import { gameRng, hashSeed } from '../engine/rng';
+import { challengeSkill } from '../engine/challengeEngine';
+import { CHALLENGE_BY_KEY } from '../data/challenges';
+import type { MinigameResult } from '../minigames/types';
+import ChallengeHost from '../minigames/ChallengeHost';
 import Portrait from '../components/atoms/Portrait';
 import { usePhase } from '../hooks/usePhase';
 import { C } from '../tokens/colors';
@@ -17,19 +20,7 @@ import { F } from '../tokens/fonts';
 type Props = StackScreenProps<GameParamList, 'RedemptionIsland'>;
 type Stage = 'intro' | 'duel' | 'result';
 
-function AutoDuelView({ onDone }: { onDone: () => void }) {
-  useEffect(() => {
-    const t = setTimeout(onDone, 2000);
-    return () => clearTimeout(t);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  return (
-    <View style={styles.autoDuelBody}>
-      <Text style={styles.narrative}>The duelists compete for survival…</Text>
-      <Text style={styles.ellipsis}>· · ·</Text>
-    </View>
-  );
-}
+const DUEL_POOL = ['fire', 'hang', 'balance'];
 
 export default function RedemptionIslandScreen({ navigation }: Props) {
   const [stage, setStage] = useState<Stage>('intro');
@@ -37,7 +28,7 @@ export default function RedemptionIslandScreen({ navigation }: Props) {
   const [loserId, setLoserId] = useState<number | null>(null);
 
   const {
-    castaways, riQueue, day, difficulty,
+    castaways, riQueue, day, difficulty, gameSeed,
     addFeedEntry, permanentEliminate, setGameMode,
   } = useGameStore(
     useShallow(s => ({
@@ -45,6 +36,7 @@ export default function RedemptionIslandScreen({ navigation }: Props) {
       riQueue:            s.riQueue,
       day:                s.day,
       difficulty:         s.difficulty,
+      gameSeed:           s.gameSeed,
       addFeedEntry:       s.addFeedEntry,
       permanentEliminate: s.permanentEliminate,
       setGameMode:        s.setGameMode,
@@ -59,25 +51,16 @@ export default function RedemptionIslandScreen({ navigation }: Props) {
   }, [riQueue, castaways]);
 
   const playerInDuel = duelists.some(c => c.id === PLAYER_ID);
-  const opponent = duelists.find(c => c.id !== PLAYER_ID);
+  const duelDef = useMemo(() => {
+    const key = DUEL_POOL[Math.floor(gameRng(gameSeed, `ri-pick-d${day}`)() * DUEL_POOL.length)];
+    return CHALLENGE_BY_KEY[key];
+  }, [gameSeed, day]);
+  const duelSeed = useMemo(() => hashSeed(gameSeed, `ri-duel-d${day}`), [gameSeed, day]);
 
-  function simulateDuel() {
-    if (duelists.length < 2) return;
-    const rng = seeded(day * 3131 + duelists[0].id + duelists[1].id);
-    const scoreA = duelists[0].stats.strength + duelists[0].stats.mental + rng() * 0.3;
-    const scoreB = duelists[1].stats.strength + duelists[1].stats.mental + rng() * 0.3;
-    const win = scoreA >= scoreB ? duelists[0] : duelists[1];
-    const lose = scoreA >= scoreB ? duelists[1] : duelists[0];
-    resolveResult(win.id, lose.id);
-  }
-
-  function handlePlayerResult(playerWon: boolean) {
-    if (!opponent) return;
-    if (playerWon) {
-      resolveResult(PLAYER_ID, opponent.id);
-    } else {
-      resolveResult(opponent.id, PLAYER_ID);
-    }
+  function onDuelComplete(result: MinigameResult) {
+    const winId = result.winnerId;
+    const loseId = duelists.find(c => c.id !== winId)?.id ?? duelists[0]?.id ?? PLAYER_ID;
+    resolveResult(winId, loseId);
   }
 
   function resolveResult(winId: number, loseId: number) {
@@ -85,12 +68,8 @@ export default function RedemptionIslandScreen({ navigation }: Props) {
     setLoserId(loseId);
     permanentEliminate(loseId, day, [winId]);
 
-    const loserName = loseId === PLAYER_ID
-      ? 'You'
-      : (castaways.find(c => c.id === loseId)?.name ?? 'Someone');
-    const winnerName = winId === PLAYER_ID
-      ? 'You'
-      : (castaways.find(c => c.id === winId)?.name ?? 'Someone');
+    const loserName = loseId === PLAYER_ID ? 'You' : (castaways.find(c => c.id === loseId)?.name ?? 'Someone');
+    const winnerName = winId === PLAYER_ID ? 'You' : (castaways.find(c => c.id === winId)?.name ?? 'Someone');
 
     addFeedEntry({
       id: `ri-duel-day${day}`,
@@ -102,9 +81,7 @@ export default function RedemptionIslandScreen({ navigation }: Props) {
       type: 'tribal',
     });
 
-    if (loseId === PLAYER_ID) {
-      setGameMode('ended');
-    }
+    if (loseId === PLAYER_ID) setGameMode('ended');
     setStage('result');
   }
 
@@ -120,18 +97,42 @@ export default function RedemptionIslandScreen({ navigation }: Props) {
   const duelistA = duelists[0];
   const duelistB = duelists[1];
 
+  // The duel itself is a minigame (player competes, or spectate for NPC vs NPC).
+  if (stage === 'duel' && duelistA && duelistB) {
+    const mk = (c: Castaway) => ({
+      id: c.id,
+      name: c.id === PLAYER_ID ? 'You' : c.name,
+      color: c.id === PLAYER_ID ? '#3d5a7c' : c.color,
+      isPlayer: c.id === PLAYER_ID,
+      skill: challengeSkill(c, duelDef.kind),
+    });
+    const participants = [mk(duelistA), mk(duelistB)];
+    const host = (
+      <ChallengeHost
+        def={duelDef}
+        participants={participants}
+        difficulty={difficulty}
+        seed={duelSeed}
+        mode={playerInDuel ? 'compete' : 'spectate'}
+        onComplete={onDuelComplete}
+      />
+    );
+    if (duelDef.fullScreen) return host;
+    return (
+      <View style={styles.playWrap}>
+        <Text style={styles.eyebrow}>REDEMPTION ISLAND DUEL</Text>
+        {host}
+      </View>
+    );
+  }
+
   return (
     <View style={styles.root}>
       <View style={styles.header}>
         <Text style={styles.eyebrow}>REDEMPTION ISLAND · DAY {day}</Text>
-        <Text style={styles.title}>
-          {stage === 'intro'  ? 'THE DUEL'  :
-           stage === 'duel'   ? 'ENDURANCE' :
-                                'SNUFFED'}
-        </Text>
+        <Text style={styles.title}>{stage === 'intro' ? 'THE DUEL' : 'SNUFFED'}</Text>
       </View>
 
-      {/* ── INTRO ── */}
       {stage === 'intro' && duelistA && duelistB && (
         <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
           <Text style={styles.narrative}>
@@ -151,27 +152,13 @@ export default function RedemptionIslandScreen({ navigation }: Props) {
               <Text style={styles.duelistJob}>{duelistB.job || 'Survivor'}</Text>
             </View>
           </View>
+          <Text style={styles.duelType}>Duel: {duelDef.displayName}</Text>
           <TouchableOpacity style={styles.ctaBtn} onPress={() => setStage('duel')}>
             <Text style={styles.ctaBtnLabel}>BEGIN THE DUEL</Text>
           </TouchableOpacity>
         </ScrollView>
       )}
 
-      {/* ── DUEL ── */}
-      {stage === 'duel' && (
-        <View style={styles.body}>
-          {playerInDuel ? (
-            <ScrollView contentContainerStyle={styles.bodyContent}>
-              <Text style={styles.narrative}>Hold on as long as you can to survive.</Text>
-              <HoldGame difficulty={difficulty} onResult={handlePlayerResult} />
-            </ScrollView>
-          ) : (
-            <AutoDuelView onDone={simulateDuel} />
-          )}
-        </View>
-      )}
-
-      {/* ── RESULT ── */}
       {stage === 'result' && winnerId !== null && loserId !== null && (
         <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
           <View style={styles.resultBlock}>
@@ -204,16 +191,18 @@ export default function RedemptionIslandScreen({ navigation }: Props) {
 
 const styles = StyleSheet.create({
   root:         { flex: 1, backgroundColor: C.night },
+  playWrap:     { flex: 1, backgroundColor: C.night, alignItems: 'center', paddingTop: 60, paddingHorizontal: 16 },
   header:       { paddingHorizontal: 24, paddingTop: 60, paddingBottom: 20, borderBottomWidth: 1, borderBottomColor: '#ffffff18' },
   eyebrow:      { fontSize: 10, fontFamily: F.mono, color: C.inkSoft, letterSpacing: 2, marginBottom: 4 },
   title:        { fontSize: 24, fontFamily: F.display, fontWeight: '800', color: C.bone, letterSpacing: -0.5 },
   body:         { flex: 1 },
   bodyContent:  { padding: 24, paddingBottom: 40 },
   narrative:    { fontSize: 14, fontFamily: F.body, color: C.bone, opacity: 0.85, lineHeight: 22, marginBottom: 28, textAlign: 'center' },
-  versusRow:    { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', marginBottom: 32 },
+  versusRow:    { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', marginBottom: 20 },
   duelistCard:  { alignItems: 'center', gap: 8, flex: 1 },
   duelistName:  { fontSize: 14, fontFamily: F.body, fontWeight: '700', color: C.bone, textAlign: 'center' },
   duelistJob:   { fontSize: 11, fontFamily: F.body, color: C.inkSoft, textAlign: 'center' },
+  duelType:     { fontSize: 11, fontFamily: F.mono, color: C.sun, letterSpacing: 1, textAlign: 'center', marginBottom: 24 },
   vs:           { fontSize: 20, fontFamily: F.display, fontWeight: '800', color: C.sun, paddingHorizontal: 8 },
   ctaBtn:       { backgroundColor: C.torch, borderRadius: 12, paddingVertical: 16, alignItems: 'center' },
   ctaBtnLabel:  { fontSize: 13, fontFamily: F.body, fontWeight: '800', color: C.bone, letterSpacing: 1 },
@@ -221,6 +210,4 @@ const styles = StyleSheet.create({
   fireGlyph:    { fontSize: 40, marginBottom: 8 },
   resultText:   { fontSize: 16, fontFamily: F.body, fontWeight: '700', color: C.torch, textAlign: 'center', lineHeight: 24 },
   resultSub:    { fontSize: 13, fontFamily: F.body, color: C.inkSoft, textAlign: 'center', marginBottom: 24 },
-  autoDuelBody: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
-  ellipsis:     { fontSize: 28, color: C.inkSoft, marginTop: 16, letterSpacing: 8 },
 });

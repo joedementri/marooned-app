@@ -19,14 +19,14 @@ function nextPhaseAfter(
   current: DayPhase,
   gameMode: string,
   playerTribeImmune: boolean,
-  redemptionIsland: boolean,
+  riActive: boolean,
   riQueueLength: number,
 ): DayPhase | null {
   const order: DayPhase[] = ['morning', 'redemption', 'reward', 'day', 'immunity', 'evening', 'tribal', 'sleep'];
   const idx = order.indexOf(current);
   if (idx === -1 || idx === order.length - 1) return null;
   let next = order[idx + 1];
-  if (next === 'redemption' && (!redemptionIsland || riQueueLength < 2)) {
+  if (next === 'redemption' && (!riActive || riQueueLength < 2)) {
     next = order[idx + 2] ?? 'sleep';
   }
   if (next === 'tribal' && gameMode === 'pre-merge' && playerTribeImmune) next = 'sleep';
@@ -61,7 +61,7 @@ export function usePhase() {
       phase,
       gameMode,
       playerTribeImmune,
-      gameSettings.redemptionIsland,
+      gameSettings.twist === 'redemption',
       riQueue.length,
     );
     advancePhase();

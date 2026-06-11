@@ -6,10 +6,11 @@ import { useHaptics } from '../hooks/useHaptics';
 import { useShallow } from 'zustand/react/shallow';
 import type { GameParamList } from '../navigation/types';
 import { useGameStore } from '../store/gameStore';
-import { simulateVotes, PLAYER_ID } from '../utils/voteSimulator';
+import { PLAYER_ID } from '../utils/voteSimulator';
 import type { VoteMap } from '../utils/voteSimulator';
-import { resolveTribal, shouldNpcPlayIdol } from '../utils/advantageResolver';
+import { resolveTribal } from '../utils/advantageResolver';
 import type { AdvantagePlay, TribalResult } from '../utils/advantageResolver';
+import { simulateTribalVotes } from '../engine/voteEngine';
 import type { AdvantageType } from '../data/advantages';
 import { ADVANTAGE_DEFS } from '../data/advantages';
 import { seeded } from '../utils/seeded';
@@ -20,7 +21,10 @@ import { usePhase } from '../hooks/usePhase';
 import Portrait from '../components/atoms/Portrait';
 import ParchmentCard from '../components/game/ParchmentCard';
 import AdvantageCard from '../components/game/AdvantageCard';
-import HoldGame from '../minigames/HoldGame';
+import FireGame from '../minigames/FireGame';
+import TribalCouncilScene from '../components/graphics/TribalCouncilScene';
+import { challengeSkill } from '../engine/challengeEngine';
+import { hashSeed } from '../engine/rng';
 import { C } from '../tokens/colors';
 import { F } from '../tokens/fonts';
 
@@ -115,6 +119,8 @@ export default function CouncilScreen({ navigation }: Props) {
   const [playerSafe, setPlayerSafe]       = useState(false);
   const [playerVote, setPlayerVote]       = useState<number | null>(null);
   const [rawVotesRef, setRawVotesRef]     = useState<VoteMap | null>(null);
+  const [npcPlaysRef, setNpcPlaysRef]     = useState<AdvantagePlay[]>([]);
+  const [npcConsumedRef, setNpcConsumedRef] = useState<Array<{ holderId: number; type: AdvantageType }>>([]);
   const [tribalResult, setTribalResult]   = useState<TribalResult | null>(null);
   const [parchmentList, setParchmentList] = useState<Array<{ name: string; voided: boolean; targetId: number }>>([]);
   const [revealIndex, setRevealIndex]     = useState(0);
@@ -145,8 +151,10 @@ export default function CouncilScreen({ navigation }: Props) {
     castaways, day, phase, gameMode,
     playerName, playerTribeId, playerAdvantages, playerIdolCount,
     immunityWinnerId, difficulty, gameSettings,
+    relationships, alliances, gameSeed, edgeIds,
     addFeedEntry, eliminateCastaway, permanentEliminate, addJuryMember,
-    removePlayerAdvantage, setPlayerIdolCount, setGameMode,
+    removePlayerAdvantage, removeCastawayAdvantage, setPlayerIdolCount, setGameMode,
+    applyTribalAftermathToStore,
   } = useGameStore(
     useShallow(s => ({
       castaways:            s.castaways,
@@ -160,13 +168,19 @@ export default function CouncilScreen({ navigation }: Props) {
       immunityWinnerId:     s.immunityWinnerId,
       difficulty:           s.difficulty,
       gameSettings:         s.gameSettings,
+      relationships:        s.relationships,
+      alliances:            s.alliances,
+      gameSeed:             s.gameSeed,
+      edgeIds:              s.edgeIds,
       addFeedEntry:         s.addFeedEntry,
       eliminateCastaway:    s.eliminateCastaway,
       permanentEliminate:   s.permanentEliminate,
       addJuryMember:        s.addJuryMember,
       removePlayerAdvantage: s.removePlayerAdvantage,
+      removeCastawayAdvantage: s.removeCastawayAdvantage,
       setPlayerIdolCount:   s.setPlayerIdolCount,
       setGameMode:          s.setGameMode,
+      applyTribalAftermathToStore: s.applyTribalAftermathToStore,
     }))
   );
 
@@ -283,47 +297,61 @@ export default function CouncilScreen({ navigation }: Props) {
     }
   }
 
+  // Run the relationship/alliance-driven vote simulation. Returns the raw votes
+  // plus the advantage plays NPCs decided to make and which of their advantages
+  // got consumed.
+  function runVoteSim(playerVoteTarget: number | null) {
+    const eligibleTargets = [
+      ...targets.map(t => t.id),
+      ...(immuneId !== PLAYER_ID && !playerSafe ? [PLAYER_ID] : []),
+    ];
+    return simulateTribalVotes({
+      voters:          councilMembers,
+      eligibleTargets,
+      playerVote:      playerSafe ? null : playerVoteTarget,
+      relationships,
+      alliances,
+      castaways,
+      day,
+      gameSeed,
+      scopeTag:        gameMode === 'pre-merge' ? playerTribeId : 'merge',
+    });
+  }
+
   function castVote(targetId: number) {
     if (stage !== 'vote') return;
     setPlayerVote(targetId);
-    const raw = simulateVotes({
-      voters:         councilMembers,
-      targets,
-      playerIsTarget: immuneId !== PLAYER_ID && !playerSafe,
-      playerVote:     targetId,
-      day,
-    });
-    setRawVotesRef(raw);
+    const ctx = runVoteSim(targetId);
+    setRawVotesRef(ctx.votes);
+    setNpcPlaysRef(ctx.npcPlays);
+    setNpcConsumedRef(ctx.consumed);
     if (postVoteAdvantages.length > 0) {
       setStage('post_vote');
     } else {
-      runCouncil(targetId, raw);
+      runCouncil(targetId, ctx.votes, ctx.npcPlays, ctx.consumed);
     }
   }
 
   function handlePostVoteDone() {
     if (rawVotesRef && playerVote !== null) {
-      runCouncil(playerVote, rawVotesRef);
+      runCouncil(playerVote, rawVotesRef, npcPlaysRef, npcConsumedRef);
     }
   }
 
   function castVoteAndRun(playerVoteTarget: number | null) {
-    const raw = simulateVotes({
-      voters:         councilMembers,
-      targets,
-      playerIsTarget: immuneId !== PLAYER_ID && !playerSafe,
-      playerVote:     playerVoteTarget ?? 0,
-      day,
-    });
-    if (playerVoteTarget !== null && !playerSafe) {
-      if (!raw[playerVoteTarget]) raw[playerVoteTarget] = [];
-      if (!raw[playerVoteTarget].includes(PLAYER_ID)) raw[playerVoteTarget].push(PLAYER_ID);
-    }
-    setRawVotesRef(raw);
-    runCouncil(playerVoteTarget, raw);
+    const ctx = runVoteSim(playerVoteTarget);
+    setRawVotesRef(ctx.votes);
+    setNpcPlaysRef(ctx.npcPlays);
+    setNpcConsumedRef(ctx.consumed);
+    runCouncil(playerVoteTarget, ctx.votes, ctx.npcPlays, ctx.consumed);
   }
 
-  function runCouncil(playerVoteTarget: number | null, rawVotes: VoteMap) {
+  function runCouncil(
+    playerVoteTarget: number | null,
+    rawVotes: VoteMap,
+    npcPlays: AdvantagePlay[],
+    npcConsumed: Array<{ holderId: number; type: AdvantageType }>,
+  ) {
     const plays: AdvantagePlay[] = [];
     if (playerSafe) {
       plays.push({ actorId: PLAYER_ID, type: 'safety_without_power' });
@@ -336,14 +364,14 @@ export default function CouncilScreen({ navigation }: Props) {
         plays.push({ actorId: PLAYER_ID, type: 'idol_nullifier', targetId: nullifyTarget });
     }
 
-    for (const npc of councilMembers) {
-      if (npc.hasIdol && shouldNpcPlayIdol(rawVotes, npc.id)) {
-        plays.push({ actorId: npc.id, type: 'hii' });
-      }
-    }
+    // NPC advantage plays decided by the vote engine.
+    plays.push(...npcPlays);
 
     const result = resolveTribal(rawVotes, plays, castaways, aliveCount, day);
     setTribalResult(result);
+
+    // Consume the advantages NPCs played.
+    npcConsumed.forEach(c => removeCastawayAdvantage(c.holderId, c.type));
 
     if (playerPlays.includes('hii')) setPlayerIdolCount(playerIdolCount - 1);
     playerPlays
@@ -375,6 +403,10 @@ export default function CouncilScreen({ navigation }: Props) {
         .filter(([k]) => Number(k) === result.eliminatedId)
         .flatMap(([, v]) => v),
     );
+
+    // Update the relationship graph: allies of the booted resent the voters,
+    // blindsided alliances fracture.
+    applyTribalAftermathToStore(rawVotes, result.eliminatedId);
 
     if (gameMode === 'post-merge') {
       const boot = castaways.find(c => c.id === result.eliminatedId);
@@ -446,34 +478,12 @@ export default function CouncilScreen({ navigation }: Props) {
     }
   }, [stage, fireSavedId, fireCompetitors]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-simulate NPC vs NPC fire after 1500ms
-  useEffect(() => {
-    if (stage !== 'fire_making' || fireCompetitors === null) return;
-    const playerInFire = fireCompetitors.includes(PLAYER_ID);
-    if (playerInFire) return; // player handles it via HoldGame
-    const t = setTimeout(() => {
-      const [fA, fB] = fireCompetitors;
-      const castA = castaways.find(c => c.id === fA);
-      const castB = castaways.find(c => c.id === fB);
-      if (!castA || !castB) return;
-      const rng = seeded(day * 8888 + fA + fB);
-      const scoreA = castA.stats.strength + castA.stats.mental + rng() * 0.4;
-      const scoreB = castB.stats.strength + castB.stats.mental + rng() * 0.4;
-      const aWins = scoreA >= scoreB;
-      handleFireResult(aWins, fA, fB);
-    }, 1500);
-    return () => clearTimeout(t);
-  }, [stage, fireCompetitors]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  function handlePlayerFireResult(playerWon: boolean) {
+  // The fire-making bout itself (player-vs-NPC or NPC-vs-NPC spectate) is rendered
+  // full-screen via the FireGame minigame — see the early return in the render.
+  function onFireComplete(winnerId: number) {
     if (!fireCompetitors) return;
     const [fA, fB] = fireCompetitors;
-    const opponentId = fA === PLAYER_ID ? fB : fA;
-    if (playerWon) {
-      handleFireResult(true, PLAYER_ID, opponentId);
-    } else {
-      handleFireResult(false, opponentId, PLAYER_ID);
-    }
+    handleFireResult(winnerId === fA, fA, fB);
   }
 
   // winnerIsA: if true fA wins, if false fB wins; or pass winId/loseId directly
@@ -544,6 +554,11 @@ export default function CouncilScreen({ navigation }: Props) {
   function handleDone() {
     const eliminated = stage === 'fire_result' ? fireLoserId : tribalResult?.eliminatedId;
     if (eliminated === PLAYER_ID) {
+      // Edge of Extinction: a voted-out player with a re-entry shot goes to the Edge.
+      if (edgeIds.includes(PLAYER_ID)) {
+        navigation.navigate('Edge');
+        return;
+      }
       setGameMode('ended');
       navigation.getParent()?.navigate('MainMenu');
       return;
@@ -576,11 +591,43 @@ export default function CouncilScreen({ navigation }: Props) {
     return castaways.filter(c => !c.eliminated && !c.onRedemptionIsland && c.id !== PLAYER_ID);
   }, [castaways, immuneId, isFireMakingCouncil]);
 
-  const playerInFire = fireCompetitors?.includes(PLAYER_ID) ?? false;
+  // Fire-making bout (F4) is rendered full-screen via the FireGame minigame.
+  if (stage === 'fire_making' && fireCompetitors !== null) {
+    const [fA, fB] = fireCompetitors;
+    const ca = castaways.find(c => c.id === fA);
+    const cb = castaways.find(c => c.id === fB);
+    if (ca && cb) {
+      const mk = (c: Castaway) => ({
+        id: c.id,
+        name: c.id === PLAYER_ID ? playerName : c.name,
+        color: c.id === PLAYER_ID ? '#3d5a7c' : c.color,
+        isPlayer: c.id === PLAYER_ID,
+        skill: challengeSkill(c, 'mixed'),
+      });
+      return (
+        <FireGame
+          difficulty={difficulty}
+          participants={[mk(ca), mk(cb)]}
+          mode={fireCompetitors.includes(PLAYER_ID) ? 'compete' : 'spectate'}
+          seed={hashSeed(gameSeed, `f4-fire-d${day}`)}
+          onComplete={(r) => onFireComplete(r.winnerId)}
+        />
+      );
+    }
+  }
+
+  const sceneAttendees = [
+    ...councilMembers.map(c => ({ id: c.id, name: c.name, color: c.color })),
+    { id: PLAYER_ID, name: playerName, color: '#3d5a7c' },
+  ];
+  const sceneSnuffedId =
+    stage === 'snuffed' ? (tribalResult?.eliminatedId ?? null) :
+    stage === 'fire_result' ? fireLoserId : null;
 
   // ─── RENDER ──────────────────────────────────────────────────────────────
   return (
     <View style={styles.root}>
+      <TribalCouncilScene attendees={sceneAttendees} snuffedId={sceneSnuffedId} height={150} />
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.eyebrow}>TRIBAL COUNCIL · DAY {day}</Text>
@@ -859,28 +906,7 @@ export default function CouncilScreen({ navigation }: Props) {
             </View>
           )}
 
-          {/* Phase B: fire making challenge or auto-sim */}
-          {fireSavedId !== null && fireCompetitors !== null && (
-            <>
-              {playerInFire ? (
-                <>
-                  <Text style={styles.jeffLine}>
-                    "Two of you will now make fire. First to build a flame stays in the game."
-                  </Text>
-                  <Text style={styles.prompt}>Outlast your opponent to reach the finale.</Text>
-                  <HoldGame difficulty={difficulty} onResult={handlePlayerFireResult} />
-                </>
-              ) : (
-                <View style={styles.autoFireWait}>
-                  <Text style={styles.narrative}>
-                    {castaways.find(c => c.id === fireCompetitors[0])?.name ?? 'Two survivors'} and{' '}
-                    {castaways.find(c => c.id === fireCompetitors[1])?.name ?? 'another'} battle for their spot…
-                  </Text>
-                  <Text style={styles.ellipsis}>· · ·</Text>
-                </View>
-              )}
-            </>
-          )}
+          {/* Once competitors are set, the bout opens full-screen (see early return). */}
         </ScrollView>
       )}
 

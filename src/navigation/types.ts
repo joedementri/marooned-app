@@ -14,6 +14,8 @@ export type GameParamList = {
   Winner: { winnerId: number; tally: Record<number, number> };
   Settings: undefined;
   RedemptionIsland: undefined;
+  Edge: undefined;
+  Intel: undefined;
 };
 
 export type RootParamList = {

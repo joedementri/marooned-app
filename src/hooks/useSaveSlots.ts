@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useGameStore } from '../store/gameStore';
 import { useSaveSlotStore } from '../store/saveSlotStore';
+import { SAVE_VERSION } from '../store/saveVersion';
 
 const SLOT_KEY = (n: number) => `marooned-save-slot-${n}`;
 
@@ -12,7 +13,7 @@ export function useSaveSlots() {
   async function saveCurrentGame(): Promise<void> {
     const state = useGameStore.getState();
     const { slotIndex, playerName, day, difficulty } = state;
-    await AsyncStorage.setItem(SLOT_KEY(slotIndex), JSON.stringify(state));
+    await AsyncStorage.setItem(SLOT_KEY(slotIndex), JSON.stringify({ ...state, __saveVersion: SAVE_VERSION }));
     updateSlot(slotIndex, { playerName, day, difficulty, saveDate: new Date().toISOString() });
   }
 
@@ -21,6 +22,13 @@ export function useSaveSlots() {
     if (!raw) return false;
     try {
       const saved = JSON.parse(raw);
+      // Reject saves from an incompatible schema version (no migration).
+      if (saved.__saveVersion !== SAVE_VERSION) {
+        await AsyncStorage.removeItem(SLOT_KEY(slotIndex));
+        clearSlot(slotIndex);
+        return false;
+      }
+      delete saved.__saveVersion;
       useGameStore.setState(saved);
       return true;
     } catch {

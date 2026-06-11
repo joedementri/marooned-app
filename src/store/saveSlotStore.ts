@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { SAVE_VERSION } from './saveVersion';
 
 export interface SaveSlotMeta {
   occupied: boolean;
@@ -58,6 +59,9 @@ export const useSaveSlotStore = create<SaveSlotStore>()(
     }),
     {
       name: 'marooned-slots',
+      version: SAVE_VERSION,
+      // Drop slot metadata from older, incompatible saves.
+      migrate: () => ({ slots: emptySlots() }),
       storage: createJSONStorage(() => AsyncStorage),
     }
   )

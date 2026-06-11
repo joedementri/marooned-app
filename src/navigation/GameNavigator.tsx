@@ -15,6 +15,8 @@ import FinalTribalScreen from '../screens/FinalTribalScreen';
 import WinnerScreen from '../screens/WinnerScreen';
 import SettingsScreen from '../screens/SettingsScreen';
 import RedemptionIslandScreen from '../screens/RedemptionIslandScreen';
+import EdgeScreen from '../screens/EdgeScreen';
+import IntelScreen from '../screens/IntelScreen';
 
 const Stack = createStackNavigator<GameParamList>();
 
@@ -34,6 +36,8 @@ export default function GameNavigator() {
       <Stack.Screen name="Winner" component={WinnerScreen} options={{ presentation: 'modal' }} />
       <Stack.Screen name="Settings" component={SettingsScreen} options={{ presentation: 'modal' }} />
       <Stack.Screen name="RedemptionIsland" component={RedemptionIslandScreen} options={{ presentation: 'modal' }} />
+      <Stack.Screen name="Edge" component={EdgeScreen} />
+      <Stack.Screen name="Intel" component={IntelScreen} />
     </Stack.Navigator>
   );
 }

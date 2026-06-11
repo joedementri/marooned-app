@@ -1,6 +1,7 @@
 import { seeded } from '../utils/seeded';
 import type { ArchetypeKey } from './archetypes';
 import type { StatKey } from './statMeta';
+import type { AdvantageType } from './advantages';
 import { FIRST_NAMES_MALE, FIRST_NAMES_FEMALE, LAST_NAMES, JOBS } from './names';
 
 export interface CastawayStats {
@@ -14,6 +15,18 @@ export interface CastawayStats {
   threat: number;
 }
 
+// Hidden personality axes that drive the social/strategy simulation. Unlike
+// `stats` (which are the player-facing relationship view), these never change and
+// shape how an NPC behaves toward *everyone*, not just the player.
+export interface CastawayPersonality {
+  boldness: number;     // big moves, early advantage plays
+  paranoia: number;     // idol-hunting drive, danger perception
+  honesty: number;      // P(intel they give the player is truthful)
+  emotionality: number; // grudge formation & decay speed
+  strateginess: number; // strategic vs social vote weighting
+  grit: number;         // endurance-challenge modifier
+}
+
 export interface Castaway {
   id: number;
   name: string;
@@ -23,11 +36,13 @@ export interface Castaway {
   color: string;
   tribeId: string;
   stats: CastawayStats;
+  personality: CastawayPersonality;
+  energy: number; // 0–1; spent on challenges/idol hunts, restored by sleep/rewards
   eliminated: boolean;
   eliminatedDay: number | null;
   onRedemptionIsland: boolean;
-  hasIdol: boolean;
-  advantages: string[];
+  hasIdol: boolean; // derived convenience mirror of advantages.includes('hii')
+  advantages: AdvantageType[];
   revealed: Record<string, boolean>;
   lastInteraction: number | null;
   relationshipLog: Array<{ day: number; note: string }>;
@@ -77,9 +92,39 @@ function buildStats(id: number, archetype: ArchetypeKey): CastawayStats {
   return stats;
 }
 
+export function buildPersonality(id: number, archetype: ArchetypeKey): CastawayPersonality {
+  const rng = seeded(id * 911 + 53);
+  const b = () => 0.3 + rng() * 0.4;
+  const p: CastawayPersonality = {
+    boldness: b(), paranoia: b(), honesty: b(),
+    emotionality: b(), strateginess: b(), grit: b(),
+  };
+  switch (archetype) {
+    case 'schemer':     p.boldness += 0.2; p.strateginess += 0.2; p.honesty -= 0.25; break;
+    case 'mastermind':  p.strateginess += 0.3; p.boldness += 0.15; p.honesty -= 0.15; break;
+    case 'strategist':  p.strateginess += 0.25; p.paranoia += 0.1; break;
+    case 'loyalist':    p.honesty += 0.2; p.emotionality += 0.1; p.boldness -= 0.1; break;
+    case 'wildcard':    p.boldness += 0.25; p.emotionality += 0.2; break;
+    case 'pessimist':   p.paranoia += 0.25; p.emotionality += 0.1; break;
+    case 'optimist':    p.honesty += 0.15; p.paranoia -= 0.15; break;
+    case 'athlete':     p.grit += 0.25; p.boldness += 0.1; break;
+    case 'threat':      p.grit += 0.2; p.boldness += 0.15; break;
+    case 'charmer':     p.honesty -= 0.1; p.strateginess += 0.1; break;
+    case 'mediator':    p.honesty += 0.15; p.emotionality -= 0.1; break;
+    case 'lonewolf':    p.paranoia += 0.2; p.strateginess += 0.1; break;
+    case 'floater':     p.boldness -= 0.15; p.strateginess -= 0.1; break;
+    case 'underdog':    p.grit += 0.15; p.emotionality += 0.15; break;
+    case 'veteran':     p.strateginess += 0.2; p.paranoia += 0.1; break;
+    case 'provider':    p.honesty += 0.1; p.grit += 0.1; break;
+  }
+  (Object.keys(p) as (keyof CastawayPersonality)[]).forEach(k => { p[k] = clamp01(p[k]); });
+  return p;
+}
+
+// tribeAssignments[i] is the tribe id for NPC slot i (id = i + 1). The caller is
+// responsible for an even split that already accounts for the player's slot.
 export function buildRandomCastaways(
-  tribeIds: string[],
-  npcCount: number,
+  tribeAssignments: string[],
   seed: number,
 ): Castaway[] {
   const rng = seeded(seed);
@@ -90,7 +135,7 @@ export function buildRandomCastaways(
 
   const castaways: Castaway[] = [];
 
-  for (let i = 0; i < npcCount; i++) {
+  for (let i = 0; i < tribeAssignments.length; i++) {
     const id = i + 1;
 
     let fullName: string;
@@ -105,7 +150,7 @@ export function buildRandomCastaways(
 
     const color = NPC_COLORS[i % NPC_COLORS.length];
     const archetype = ARCHETYPE_KEYS[Math.floor(rng() * ARCHETYPE_KEYS.length)];
-    const tribeId = tribeIds[i % tribeIds.length];
+    const tribeId = tribeAssignments[i];
 
     castaways.push({
       id,
@@ -116,6 +161,8 @@ export function buildRandomCastaways(
       color,
       tribeId,
       stats: buildStats(id, archetype),
+      personality: buildPersonality(id, archetype),
+      energy: 0.8 + rng() * 0.2,
       eliminated: false,
       eliminatedDay: null,
       onRedemptionIsland: false,

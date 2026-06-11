@@ -8,12 +8,19 @@ import { createAdvantageSlice, type AdvantageSlice } from './slices/advantageSli
 import { createJurySlice, type JurySlice } from './slices/jurySlice';
 import { createIslandSlice, type IslandSlice } from './slices/islandSlice';
 import { createRedemptionIslandSlice, type RedemptionIslandSlice } from './slices/redemptionIslandSlice';
-import { buildRandomCastaways } from '../data/roster';
+import { createSocialSlice, type SocialSlice } from './slices/socialSlice';
+import { createIntelSlice, type IntelSlice } from './slices/intelSlice';
+import { createSimSlice, type SimSlice } from './slices/simSlice';
+import { createEdgeSlice, type EdgeSlice } from './slices/edgeSlice';
+import { buildRandomCastaways, buildPersonality } from '../data/roster';
 import type { Castaway } from '../data/roster';
 import { PRE_MERGE_TRIBE_NAMES, MERGE_TRIBE_NAMES } from '../data/tribes';
 import { PLAYER_ID } from '../utils/voteSimulator';
 import { INITIAL_LOCATIONS } from '../data/locations';
-import { seeded } from '../utils/seeded';
+import { initRelationships } from '../engine/socialEngine';
+import { makeParticipant, simulateHeadlessChallenge } from '../engine/challengeEngine';
+import { gameRng, hashSeed, shuffled } from '../engine/rng';
+import { SAVE_VERSION } from './saveVersion';
 
 export interface Tribe {
   id: string;
@@ -21,10 +28,13 @@ export interface Tribe {
   color: string;
 }
 
+export type TwistKind = 'none' | 'redemption' | 'edge';
+
 export interface GameSettings {
   totalCastaways: number;
   numTribes: number;
-  redemptionIsland: boolean;
+  twist: TwistKind;
+  edgePreMerge: boolean; // Edge of Extinction: also send pre-merge boots to the Edge
   jurySize: number;
   finaleSize: number;
   finalTcStyle: 'vote' | 'fire';
@@ -33,7 +43,8 @@ export interface GameSettings {
 export const DEFAULT_GAME_SETTINGS: GameSettings = {
   totalCastaways: 18,
   numTribes: 2,
-  redemptionIsland: false,
+  twist: 'none',
+  edgePreMerge: false,
   jurySize: 9,
   finaleSize: 3,
   finalTcStyle: 'vote',
@@ -59,6 +70,9 @@ interface GameRootState {
   feed: FeedEntry[];
   isGameActive: boolean;
   gameSettings: GameSettings;
+  gameSeed: number;
+  lastSimTick: string | null;
+  playerEdgeReentryUsed: boolean;
 }
 
 interface GameRootActions {
@@ -80,6 +94,10 @@ export type GameStore =
   JurySlice &
   IslandSlice &
   RedemptionIslandSlice &
+  SocialSlice &
+  IntelSlice &
+  SimSlice &
+  EdgeSlice &
   GameRootState &
   GameRootActions;
 
@@ -95,6 +113,9 @@ const ROOT_DEFAULTS: GameRootState = {
   feed: [],
   isGameActive: false,
   gameSettings: DEFAULT_GAME_SETTINGS,
+  gameSeed: 0,
+  lastSimTick: null,
+  playerEdgeReentryUsed: false,
 };
 
 export const useGameStore = create<GameStore>()(
@@ -108,16 +129,21 @@ export const useGameStore = create<GameStore>()(
       ...createJurySlice(set, get, api),
       ...createIslandSlice(set, get, api),
       ...createRedemptionIslandSlice(set, get, api),
+      ...createSocialSlice(set, get, api),
+      ...createIntelSlice(set, get, api),
+      ...createSimSlice(set, get, api),
+      ...createEdgeSlice(set, get, api),
 
       startNewGame({ slotIndex, playerName, difficulty, settings }) {
         const { totalCastaways, numTribes } = settings;
-        const rng = seeded((Date.now() % 100000) + slotIndex * 13);
+        const gameSeed = hashSeed(Date.now(), slotIndex, playerName);
+        const setupRng = gameRng(gameSeed, 'setup');
 
         // Pick numTribes distinct names
         const pool = [...PRE_MERGE_TRIBE_NAMES];
         const tribeNames: string[] = [];
         for (let i = 0; i < numTribes; i++) {
-          const idx = Math.floor(rng() * pool.length);
+          const idx = Math.floor(setupRng() * pool.length);
           tribeNames.push(pool[idx]);
           pool.splice(idx, 1);
         }
@@ -129,12 +155,18 @@ export const useGameStore = create<GameStore>()(
         }));
 
         const tribeIds = tribes.map(t => t.id);
-        const playerTribeId = tribeIds[Math.floor(rng() * tribeIds.length)];
-        const mergeTribeName = MERGE_TRIBE_NAMES[Math.floor(rng() * MERGE_TRIBE_NAMES.length)];
+        const mergeTribeName = MERGE_TRIBE_NAMES[Math.floor(setupRng() * MERGE_TRIBE_NAMES.length)];
 
-        const npcCount = totalCastaways - 1;
-        const npcSeed = (Date.now() % 100000) + slotIndex * 17;
-        const npcs = buildRandomCastaways(tribeIds, npcCount, npcSeed);
+        // Allocate every slot — including the player's — evenly across tribes, then
+        // shuffle so the player isn't always on tribe 0. This is the fix for the
+        // old "player added as an extra body" bug.
+        const slots = shuffled(
+          Array.from({ length: totalCastaways }, (_, i) => tribeIds[i % tribeIds.length]),
+          gameRng(gameSeed, 'tribe-alloc'),
+        );
+        const playerTribeId = slots[0];
+        const npcAssignments = slots.slice(1);
+        const npcs = buildRandomCastaways(npcAssignments, hashSeed(gameSeed, 'npc'));
 
         const playerCastaway: Castaway = {
           id: PLAYER_ID,
@@ -149,6 +181,8 @@ export const useGameStore = create<GameStore>()(
             mood: 0.75, strength: 0.5, mental: 0.5,
             social: 0.5, threat: 0.2,
           },
+          personality: buildPersonality(PLAYER_ID, 'strategist'),
+          energy: 1,
           eliminated: false,
           eliminatedDay: null,
           onRedemptionIsland: false,
@@ -169,6 +203,9 @@ export const useGameStore = create<GameStore>()(
           playerName,
           difficulty,
           gameSettings: settings,
+          gameSeed,
+          lastSimTick: null,
+          playerEdgeReentryUsed: false,
           playerTribeId,
           tribes,
           mergeTribeName,
@@ -190,7 +227,16 @@ export const useGameStore = create<GameStore>()(
           searchesToday: 0,
           playerCluesHeld: 0,
           riQueue: [],
+          relationships: initRelationships(castaways, gameSeed),
+          alliances: [],
+          intel: [],
+          edgeIds: [],
+          edgeState: {},
+          edgeReturnsDone: 0,
         });
+
+        // Project the freshly-seeded npc→player edges into player-facing stats.
+        get().syncPlayerFacingStats();
       },
 
       addFeedEntry(entry) {
@@ -198,7 +244,7 @@ export const useGameStore = create<GameStore>()(
       },
 
       triggerMerge() {
-        const { mergeTribeName, day, phase, castaways, gameSettings, riQueue } = get();
+        const { mergeTribeName, day, phase, gameSettings, riQueue, gameSeed } = get();
         const name = mergeTribeName ?? 'Tabu';
         const mergeId = name.toLowerCase();
         const mergeColor = '#c98a2a';
@@ -208,7 +254,9 @@ export const useGameStore = create<GameStore>()(
           playerTribeId: mergeId,
           tribes: [...state.tribes, { id: mergeId, name, color: mergeColor }],
           castaways: state.castaways.map(c =>
-            c.eliminated ? c : { ...c, tribeId: mergeId }
+            c.eliminated || c.onRedemptionIsland || state.edgeIds.includes(c.id)
+              ? c
+              : { ...c, tribeId: mergeId }
           ),
         }));
 
@@ -222,10 +270,9 @@ export const useGameStore = create<GameStore>()(
         get().reshuffleIdolLocations();
 
         // Redemption Island re-entry: last RI castaway comes back
-        if (gameSettings.redemptionIsland && riQueue.length > 0) {
+        if (gameSettings.twist === 'redemption' && riQueue.length > 0) {
           const returneeId = riQueue[riQueue.length - 1];
           get().removeFromRedemptionIsland(returneeId);
-          // Assign them to merge tribe
           set(state => ({
             castaways: state.castaways.map(c =>
               c.id === returneeId ? { ...c, tribeId: mergeId, onRedemptionIsland: false } : c
@@ -251,7 +298,30 @@ export const useGameStore = create<GameStore>()(
           });
         }
 
-        const alive = get().castaways.filter(c => !c.eliminated).length;
+        // Edge of Extinction: NPC edge dwellers compete to re-enter at the merge.
+        if (gameSettings.twist === 'edge') {
+          const edgeNpcs = get().edgeIds.filter(id => id !== PLAYER_ID);
+          if (edgeNpcs.length > 0) {
+            const participants = edgeNpcs
+              .map(id => get().castaways.find(c => c.id === id))
+              .filter((c): c is Castaway => !!c)
+              .map(c => makeParticipant(c, 'mixed', false));
+            const result = simulateHeadlessChallenge(participants, hashSeed(gameSeed, `edge-reentry-merge-d${day}`));
+            get().resolveReentry(result.winnerId);
+            const name = get().castaways.find(c => c.id === result.winnerId)?.name ?? 'Someone';
+            get().addFeedEntry({
+              id: `edge-return-day${day}`,
+              day,
+              phase,
+              text: `${name} wins their way back from the Edge of Extinction!`,
+              type: 'merge',
+            });
+          }
+        }
+
+        const alive = get().castaways.filter(
+          c => !c.eliminated && !c.onRedemptionIsland && !get().edgeIds.includes(c.id)
+        ).length;
         get().addFeedEntry({
           id: `merge-note-day${day}`,
           day,
@@ -280,11 +350,19 @@ export const useGameStore = create<GameStore>()(
           searchesToday: 0,
           playerCluesHeld: 0,
           riQueue: [],
+          relationships: {},
+          alliances: [],
+          intel: [],
+          edgeIds: [],
+          edgeState: {},
+          edgeReturnsDone: 0,
         });
       },
     }),
     {
-      name: 'marooned-game-current',
+      name: 'marooned-game-v2',
+      version: SAVE_VERSION,
+      migrate: (persisted, version) => (version === SAVE_VERSION ? (persisted as GameStore) : (undefined as unknown as GameStore)),
       storage: createJSONStorage(() => AsyncStorage),
     }
   )

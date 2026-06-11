@@ -49,11 +49,13 @@ function ConnRow({ castaway, label, labelColor, onPress, theme }: ConnRowProps) 
 export default function CastawayDetailScreen({ navigation, route }: Props) {
   const theme = useTheme();
 
-  const { castaway, tribes, castaways } = useGameStore(
+  const { castaway, tribes, castaways, intel, alliances } = useGameStore(
     useShallow(s => ({
       castaway:  s.castaways.find(c => c.id === route.params.castawayId),
       tribes:    s.tribes,
       castaways: s.castaways,
+      intel:     s.intel,
+      alliances: s.alliances,
     }))
   );
 
@@ -78,6 +80,9 @@ export default function CastawayDetailScreen({ navigation, route }: Props) {
 
   const leftStats  = STAT_ORDER.slice(0, 4);
   const rightStats = STAT_ORDER.slice(4);
+
+  const relatedIntel = intel.filter(e => e.subjectIds.includes(castaway.id)).slice(0, 4);
+  const sharedAlliances = alliances.filter(a => a.knownToPlayer && a.memberIds.includes(castaway.id));
 
   return (
     <ScrollView
@@ -226,6 +231,25 @@ export default function CastawayDetailScreen({ navigation, route }: Props) {
         </>
       )}
 
+      {/* ── Intel & alliances ── */}
+      {(relatedIntel.length > 0 || sharedAlliances.length > 0) && (
+        <>
+          <Text style={[styles.sectionLabel, { color: theme.textSoft }]}>WHAT YOU KNOW</Text>
+          <View style={[styles.card, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}>
+            {sharedAlliances.map(a => (
+              <Text key={a.id} style={[styles.intelLine, { color: C.ocean }]}>
+                ◆ In an alliance: {a.name} ({a.memberIds.length})
+              </Text>
+            ))}
+            {relatedIntel.map(e => (
+              <Text key={e.id} style={[styles.intelLine, { color: theme.text }]}>
+                • {e.text} <Text style={{ color: theme.textSoft }}>({e.confidence})</Text>
+              </Text>
+            ))}
+          </View>
+        </>
+      )}
+
       {/* ── Relationship log ── */}
       {castaway.relationshipLog.length > 0 && (
         <>
@@ -251,11 +275,17 @@ export default function CastawayDetailScreen({ navigation, route }: Props) {
             <Text style={styles.ctaPrimaryLabel}>◐  PULL ASIDE</Text>
           </TouchableOpacity>
           <View style={styles.ctaGhostRow}>
-            <TouchableOpacity style={[styles.ctaGhost, { borderColor: theme.cardBorder }]}>
+            <TouchableOpacity
+              style={[styles.ctaGhost, { borderColor: theme.cardBorder }]}
+              onPress={() => navigation.navigate('Convo', { castawayId: castaway.id })}
+            >
               <Text style={[styles.ctaGhostLabel, { color: theme.text }]}>✦  PITCH ALLIANCE</Text>
             </TouchableOpacity>
-            <TouchableOpacity style={[styles.ctaGhost, { borderColor: theme.cardBorder }]}>
-              <Text style={[styles.ctaGhostLabel, { color: theme.text }]}>◇  SPREAD DOUBT</Text>
+            <TouchableOpacity
+              style={[styles.ctaGhost, { borderColor: theme.cardBorder }]}
+              onPress={() => navigation.navigate('Convo', { castawayId: castaway.id })}
+            >
+              <Text style={[styles.ctaGhostLabel, { color: theme.text }]}>◇  ASK AROUND</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -307,6 +337,9 @@ const styles = StyleSheet.create({
   connName:        { fontFamily: F.display, fontWeight: '700', fontSize: 14, lineHeight: 18 },
   connMeta:        { fontFamily: F.body, fontSize: 11, marginTop: 1 },
   connDivider:     { height: 1 },
+
+  // Intel
+  intelLine:       { fontFamily: F.body, fontSize: 12, lineHeight: 18, marginBottom: 6 },
 
   // Log
   logRow:          { flexDirection: 'row', gap: 10, marginBottom: 6 },

@@ -19,6 +19,7 @@ export interface IslandSlice {
   searchLocation(locationId: string): SearchResult;
   reshuffleIdolLocations(): void;
   resetDailySearches(): void;
+  addPlayerClue(n?: number): void;
 }
 
 export const createIslandSlice: StateCreator<GameStore, [], [], IslandSlice> = (set, get) => ({
@@ -94,5 +95,9 @@ export const createIslandSlice: StateCreator<GameStore, [], [], IslandSlice> = (
 
   resetDailySearches() {
     set({ searchesToday: 0 });
+  },
+
+  addPlayerClue(n = 1) {
+    set(state => ({ playerCluesHeld: state.playerCluesHeld + n }));
   },
 });

@@ -117,7 +117,7 @@ export default function HomeScreen({ navigation }: Props) {
 
   const {
     playerName, playerTribeId, tribes, feed, castaways,
-    playerIdolCount, playerAdvantages, playerImmunityWins,
+    playerIdolCount, playerAdvantages, playerImmunityWins, edgeIds,
   } = useGameStore(
     useShallow(s => ({
       playerName:          s.playerName,
@@ -128,7 +128,15 @@ export default function HomeScreen({ navigation }: Props) {
       playerIdolCount:     s.playerIdolCount,
       playerAdvantages:    s.playerAdvantages,
       playerImmunityWins:  s.playerImmunityWins,
+      edgeIds:             s.edgeIds,
     }))
+  );
+
+  // If the player is currently banished to the Edge, send them there.
+  useFocusEffect(
+    useCallback(() => {
+      if (edgeIds.includes(PLAYER_ID)) navigation.navigate('Edge');
+    }, [edgeIds, navigation]),
   );
 
   const allAdvantages: AdvantageType[] = [
@@ -231,6 +239,11 @@ export default function HomeScreen({ navigation }: Props) {
                 glyph="✦" label="Search" sub="Hunt for idols"
                 onPress={() => navigation.navigate('Island')}
                 accent={C.palm} theme={theme}
+              />
+              <ActionTile
+                glyph="✎" label="Journal" sub="Intel & alliances"
+                onPress={() => navigation.navigate('Intel')}
+                accent={C.inkMid} theme={theme}
               />
               {phase === 'morning' && (
                 <ActionTile

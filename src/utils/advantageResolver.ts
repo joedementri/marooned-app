@@ -81,16 +81,15 @@ export function resolveTribal(
         }
 
         case 'idol_nullifier': {
-          if (play.targetId == null) break;
-          // Cancel any HII play by targetId (handled when HII is processed)
-          // Mark nullification; HII loop checks this
-          result.idolNullified = true;
+          // Nullification is resolved per-target inside the HII case below.
           break;
         }
 
         case 'hii': {
-          // Check if this play is nullified
-          if (result.idolNullified && plays.some(p => p.type === 'idol_nullifier' && p.targetId === play.actorId)) {
+          // This specific idol play is cancelled only if a nullifier names this actor.
+          const nullified = plays.some(p => p.type === 'idol_nullifier' && p.targetId === play.actorId);
+          if (nullified) {
+            result.idolNullified = true;
             break; // idol cancelled
           }
           // HII: remove all votes targeting the actor
@@ -100,7 +99,6 @@ export function resolveTribal(
             result.idolPlayerId = play.actorId;
             delete result.resolvedVotes[play.actorId];
           }
-          // NPC plays their idol when ≥3 votes (handled outside resolver for NPC auto-plays)
           break;
         }
       }

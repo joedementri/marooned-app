@@ -340,21 +340,43 @@ export default function NewGameSetupScreen({ route, navigation }: Props) {
           </Text>
         )}
 
-        {/* Redemption Island */}
-        <View style={[styles.toggleRow, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}>
-          <View style={styles.toggleInfo}>
-            <Text style={[styles.toggleLabel, { color: theme.text }]}>REDEMPTION ISLAND</Text>
-            <Text style={[styles.toggleDesc, { color: theme.textSoft }]}>
-              Eliminated pre-merge players duel. Winner re-enters at merge.
-            </Text>
-          </View>
-          <Switch
-            value={settings.redemptionIsland}
-            onValueChange={v => updateSettings({ redemptionIsland: v })}
-            trackColor={{ false: C.inkSoft, true: C.palmLight }}
-            thumbColor={C.bone}
-          />
+        {/* Return Twist */}
+        <Text style={[styles.fieldLabel, { color: theme.textSoft }]}>RETURN TWIST</Text>
+        <View style={styles.segRow}>
+          {([['none', 'NONE'], ['redemption', 'REDEMPTION'], ['edge', 'EDGE']] as const).map(([key, label]) => {
+            const active = settings.twist === key;
+            return (
+              <Pressable
+                key={key}
+                style={[styles.segBtn, { borderColor: theme.cardBorder }, active && styles.segBtnActive]}
+                onPress={() => updateSettings({ twist: key })}
+              >
+                <Text style={[styles.segLabel, active && styles.segLabelActive]}>{label}</Text>
+              </Pressable>
+            );
+          })}
         </View>
+        <Text style={[styles.settingNote, { color: theme.textSoft }]}>
+          {settings.twist === 'none' && 'Voted-out players are gone for good.'}
+          {settings.twist === 'redemption' && 'Pre-merge boots duel on Redemption Island. The winner re-enters at the merge.'}
+          {settings.twist === 'edge' && 'Boots live on the Edge of Extinction, scavenging advantages for a shot to return.'}
+        </Text>
+        {settings.twist === 'edge' && (
+          <View style={[styles.toggleRow, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}>
+            <View style={styles.toggleInfo}>
+              <Text style={[styles.toggleLabel, { color: theme.text }]}>PRE-MERGE EDGE</Text>
+              <Text style={[styles.toggleDesc, { color: theme.textSoft }]}>
+                Send pre-merge boots to the Edge too, not just post-merge.
+              </Text>
+            </View>
+            <Switch
+              value={settings.edgePreMerge}
+              onValueChange={v => updateSettings({ edgePreMerge: v })}
+              trackColor={{ false: C.inkSoft, true: C.palmLight }}
+              thumbColor={C.bone}
+            />
+          </View>
+        )}
 
         {/* Summary */}
         <View style={[styles.summaryCard, { backgroundColor: theme.cardBg, borderColor: theme.cardBorder }]}>
@@ -380,10 +402,12 @@ export default function NewGameSetupScreen({ route, navigation }: Props) {
               {settings.finalTcStyle === 'fire' ? ' · Fire Making at F4' : ''}
             </Text>
           </View>
-          {settings.redemptionIsland && (
+          {settings.twist !== 'none' && (
             <View style={styles.summaryRow}>
               <Text style={[styles.summaryKey, { color: theme.textSoft }]}>Twist</Text>
-              <Text style={[styles.summaryVal, { color: C.sun }]}>Redemption Island</Text>
+              <Text style={[styles.summaryVal, { color: C.sun }]}>
+                {settings.twist === 'redemption' ? 'Redemption Island' : 'Edge of Extinction'}
+              </Text>
             </View>
           )}
         </View>

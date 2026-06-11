@@ -10,6 +10,8 @@ import { simulateJuryVotes } from '../utils/juryVoteSimulator';
 import { initials } from '../data/roster';
 import Portrait from '../components/atoms/Portrait';
 import ParchmentCard from '../components/game/ParchmentCard';
+import TribalCouncilScene from '../components/graphics/TribalCouncilScene';
+import { getRel } from '../engine/socialEngine';
 import { C } from '../tokens/colors';
 import { F } from '../tokens/fonts';
 import { PLAYER_ID } from '../utils/voteSimulator';
@@ -131,7 +133,7 @@ export default function FinalTribalScreen({ navigation }: Props) {
   const hap = useHaptics();
 
   const {
-    castaways, jury, playerName, day, gameSettings,
+    castaways, jury, playerName, day, gameSettings, relationships,
     addFeedEntry, setGameMode, setJuryVote,
   } = useGameStore(
     useShallow(s => ({
@@ -140,6 +142,7 @@ export default function FinalTribalScreen({ navigation }: Props) {
       playerName:     s.playerName,
       day:            s.day,
       gameSettings:   s.gameSettings,
+      relationships:  s.relationships,
       addFeedEntry:   s.addFeedEntry,
       setGameMode:    s.setGameMode,
       setJuryVote:    s.setJuryVote,
@@ -152,14 +155,21 @@ export default function FinalTribalScreen({ navigation }: Props) {
   // Simulate jury votes once, lazily
   const computeJuryResult = useCallback(() => {
     if (juryResult) return juryResult;
-    const playerSocialScore = 0.6; // player has no tracked social stat; use moderate default
+    // The player's "social score" with the jury is how warmly the jurors actually
+    // regarded them — averaged trust + affinity across the jury's edges to the player.
+    const playerSocialScore = jury.length > 0
+      ? jury.reduce((sum, j) => {
+          const r = getRel(relationships, j.castawayId, PLAYER_ID);
+          return sum + Math.max(0, Math.min(1, (r.trust + (r.affinity + 1) / 2) / 2));
+        }, 0) / jury.length
+      : 0.6;
     const result = simulateJuryVotes(jury, finalists, true, playerSocialScore, day);
     // Persist votes to store
     Object.entries(result.votes).forEach(([jurorId, finalistId]) => {
       setJuryVote(Number(jurorId), finalistId);
     });
     return result;
-  }, [juryResult, jury, finalists, day, setJuryVote]);
+  }, [juryResult, jury, finalists, day, setJuryVote, relationships]);
 
   // Build ordered parchment list: each jury vote = one parchment, winner's votes last
   function buildParchments(result: typeof juryResult) {
@@ -260,6 +270,11 @@ export default function FinalTribalScreen({ navigation }: Props) {
 
   return (
     <View style={styles.root}>
+      <TribalCouncilScene
+        attendees={alive.map(c => ({ id: c.id, name: c.id === PLAYER_ID ? playerName : c.name, color: c.color }))}
+        snuffedId={null}
+        height={120}
+      />
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.eyebrow}>FINAL TRIBAL COUNCIL · DAY {day}</Text>
