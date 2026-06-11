@@ -1,30 +1,43 @@
 {
   "expo": {
-    "name": "marooned-app",
-    "slug": "marooned-app",
+    "name": "Marooned",
+    "slug": "marooned",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "scheme": "marooned",
+    "userInterfaceStyle": "dark",
     "newArchEnabled": true,
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#0e1428"
     },
     "ios": {
-      "supportsTablet": true
+      "bundleIdentifier": "com.marooned.app",
+      "supportsTablet": false,
+      "infoPlist": {
+        "UIRequiresFullScreen": true
+      }
     },
     "android": {
+      "package": "com.marooned.app",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
-      },
-      "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+        "backgroundColor": "#0e1428"
+      }
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "expo-font"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "ac029025-d0e4-4a10-95f4-829e697a649d"
+      }
+    },
+    "owner": "joedementri"
   }
 }
