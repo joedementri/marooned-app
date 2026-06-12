@@ -163,13 +163,13 @@ export default function FinalTribalScreen({ navigation }: Props) {
           return sum + Math.max(0, Math.min(1, (r.trust + (r.affinity + 1) / 2) / 2));
         }, 0) / jury.length
       : 0.6;
-    const result = simulateJuryVotes(jury, finalists, true, playerSocialScore, day);
+    const result = simulateJuryVotes(jury, finalists, true, playerSocialScore, day, castaways);
     // Persist votes to store
     Object.entries(result.votes).forEach(([jurorId, finalistId]) => {
       setJuryVote(Number(jurorId), finalistId);
     });
     return result;
-  }, [juryResult, jury, finalists, day, setJuryVote, relationships]);
+  }, [juryResult, jury, finalists, day, setJuryVote, relationships, castaways]);
 
   // Build ordered parchment list: each jury vote = one parchment, winner's votes last
   function buildParchments(result: typeof juryResult) {

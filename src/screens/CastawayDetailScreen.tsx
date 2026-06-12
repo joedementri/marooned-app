@@ -10,6 +10,7 @@ import type { Castaway } from '../data/roster';
 import { STAT_META } from '../data/statMeta';
 import type { StatKey } from '../data/statMeta';
 import { ARCHETYPES } from '../data/archetypes';
+import { getRel, mutualAffinity } from '../engine/socialEngine';
 import { C } from '../tokens/colors';
 import { F } from '../tokens/fonts';
 import { useTheme } from '../contexts/ThemeContext';
@@ -49,13 +50,14 @@ function ConnRow({ castaway, label, labelColor, onPress, theme }: ConnRowProps) 
 export default function CastawayDetailScreen({ navigation, route }: Props) {
   const theme = useTheme();
 
-  const { castaway, tribes, castaways, intel, alliances } = useGameStore(
+  const { castaway, tribes, castaways, intel, alliances, relationships } = useGameStore(
     useShallow(s => ({
-      castaway:  s.castaways.find(c => c.id === route.params.castawayId),
-      tribes:    s.tribes,
-      castaways: s.castaways,
-      intel:     s.intel,
-      alliances: s.alliances,
+      castaway:      s.castaways.find(c => c.id === route.params.castawayId),
+      tribes:        s.tribes,
+      castaways:     s.castaways,
+      intel:         s.intel,
+      alliances:     s.alliances,
+      relationships: s.relationships,
     }))
   );
 
@@ -73,10 +75,23 @@ export default function CastawayDetailScreen({ navigation, route }: Props) {
   const tribe = tribes.find(t => t.id === castaway.tribeId);
   const archRevealed = castaway.revealed.archetype;
 
-  // Connections
+  // Connections — derived from this castaway's own relationship edges, not the
+  // global player-facing stats (those describe everyone's view of the player).
   const alive = castaways.filter(c => c.id !== castaway.id && !c.eliminated);
-  const closeAlly = [...alive].sort((a, b) => b.stats.loyalty   - a.stats.loyalty)[0];
-  const rival     = [...alive].sort((a, b) => b.stats.suspicion - a.stats.suspicion)[0];
+  const closeAlly = [...alive].sort((a, b) =>
+    mutualAffinity(relationships, castaway.id, b.id) - mutualAffinity(relationships, castaway.id, a.id)
+  )[0];
+  const rival = [...alive]
+    .filter(c => {
+      const r = getRel(relationships, castaway.id, c.id);
+      return r.grudge > 0.15 || r.affinity < -0.1;
+    })
+    .sort((a, b) => {
+      const ra = getRel(relationships, castaway.id, a.id);
+      const rb = getRel(relationships, castaway.id, b.id);
+      // Grudge first; fall back to most-disliked when nobody holds a grudge.
+      return (rb.grudge - ra.grudge) || (ra.affinity - rb.affinity);
+    })[0];
 
   const leftStats  = STAT_ORDER.slice(0, 4);
   const rightStats = STAT_ORDER.slice(4);

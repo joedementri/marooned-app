@@ -76,8 +76,11 @@ export default function EndDayScreen({ navigation }: Props) {
   }, [revealCount, todayFeed.length]);
 
   const allRevealed = revealCount >= todayFeed.length;
+  const [advancing, setAdvancing] = useState(false);
 
   async function handleNextDay() {
+    if (advancing) return;
+    setAdvancing(true);
     incrementDay();
     await saveCurrentGame();
     navigation.goBack();
@@ -128,9 +131,9 @@ export default function EndDayScreen({ navigation }: Props) {
           Good night, {playerName || 'Survivor'}.
         </Text>
         <TouchableOpacity
-          style={[styles.nextBtn, !allRevealed && todayFeed.length > 0 && styles.nextBtnDisabled]}
+          style={[styles.nextBtn, (advancing || (!allRevealed && todayFeed.length > 0)) && styles.nextBtnDisabled]}
           onPress={handleNextDay}
-          disabled={!allRevealed && todayFeed.length > 0}
+          disabled={advancing || (!allRevealed && todayFeed.length > 0)}
         >
           <Text style={styles.nextBtnLabel}>☀  WAKE — DAY {day + 1}</Text>
         </TouchableOpacity>

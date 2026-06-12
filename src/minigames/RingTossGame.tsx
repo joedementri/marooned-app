@@ -31,7 +31,7 @@ export default function RingTossGame(props: MinigameProps) {
   const pegXs = [beamW * 0.22, beamW * 0.5, beamW * 0.78];
 
   const [pegHits, setPegHits] = useState<number[]>([0, 0, 0]);
-  const [throwsLeft, setThrowsLeft] = useState(cfg.throws);
+  const [throwsLeft, setThrowsLeft] = useState<number>(cfg.throws);
   const [hits, setHits] = useState(0);
   const [aim, setAim] = useState<number | null>(null);
   const [ring, setRing] = useState<{ x: number; y: number } | null>(null);

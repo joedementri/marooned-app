@@ -32,24 +32,29 @@ export interface JuryVoteResult {
   winnerId: number;              // finalist with most jury votes
 }
 
-// finalists: the 2–3 alive castaways at final tribal (player excluded from this array)
+// finalists: the 2–3 alive castaways at final tribal (may include the player)
 // playerIsFinalist: if true, player's id is 0 and competes for jury votes
 // playerSocialScore: snapshot of player's social stat for jury weighting
+// castaways: full roster, used to look up juror archetypes
 export function simulateJuryVotes(
   jury: JuryMember[],
-  finalists: Castaway[],         // NPC finalists
+  finalists: Castaway[],
   playerIsFinalist: boolean,
   playerSocialScore: number,     // 0–1
   day: number,
+  castaways: Castaway[],
 ): JuryVoteResult {
   const rng = seeded(day * 3_333 + jury.length * 17);
 
-  const finalistIds = finalists.map(f => f.id);
-  if (playerIsFinalist) finalistIds.push(0); // 0 = player
+  const finalistIds = [...new Set([
+    ...finalists.map(f => f.id),
+    ...(playerIsFinalist ? [0] : []), // 0 = player
+  ])];
 
   const votes: Record<number, number> = {};
   const tally: Record<number, number> = {};
-  finalistIds.forEach(id => { tally[id] = 0; });
+  const scoreSum: Record<number, number> = {};
+  finalistIds.forEach(id => { tally[id] = 0; scoreSum[id] = 0; });
 
   for (const juror of jury) {
     const scores = finalistIds.map(finalistId => {
@@ -70,7 +75,7 @@ export function simulateJuryVotes(
       } else {
         const finalist = finalists.find(f => f.id === finalistId)!;
         score += archetypeBonus(
-          finalists.find(f => f.id === juror.castawayId)?.archetype ?? '',
+          castaways.find(c => c.id === juror.castawayId)?.archetype ?? '',
           finalist.archetype,
         );
         score += finalist.stats.social * 10;
@@ -86,11 +91,21 @@ export function simulateJuryVotes(
     const picked = scores[0].finalistId;
     votes[juror.castawayId] = picked;
     tally[picked] = (tally[picked] ?? 0) + 1;
+    for (const { finalistId, score } of scores) scoreSum[finalistId] += score;
   }
 
-  // Winner = most jury votes (ties broken by higher tally ordering; first = winner)
-  const winnerId = Object.entries(tally)
-    .sort(([, a], [, b]) => b - a)[0]?.[0];
+  // Winner = most jury votes. Ties break to the finalist the jury scored
+  // higher overall, then a seeded coin flip — never insertion order.
+  const topVotes = Math.max(...finalistIds.map(id => tally[id]));
+  const tied = finalistIds.filter(id => tally[id] === topVotes);
+  let winnerId: number;
+  if (tied.length === 1) {
+    winnerId = tied[0];
+  } else {
+    const topScore = Math.max(...tied.map(id => scoreSum[id]));
+    const best = tied.filter(id => scoreSum[id] === topScore);
+    winnerId = best[Math.floor(rng() * best.length)];
+  }
 
-  return { votes, tally, winnerId: Number(winnerId ?? finalistIds[0]) };
+  return { votes, tally, winnerId };
 }

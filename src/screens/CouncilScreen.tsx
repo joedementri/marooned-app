@@ -24,6 +24,7 @@ import AdvantageCard from '../components/game/AdvantageCard';
 import FireGame from '../minigames/FireGame';
 import TribalCouncilScene from '../components/graphics/TribalCouncilScene';
 import { challengeSkill } from '../engine/challengeEngine';
+import { buildJuryRelScores } from '../utils/juryRelScores';
 import { hashSeed } from '../engine/rng';
 import { C } from '../tokens/colors';
 import { F } from '../tokens/fonts';
@@ -411,8 +412,7 @@ export default function CouncilScreen({ navigation }: Props) {
     if (gameMode === 'post-merge') {
       const boot = castaways.find(c => c.id === result.eliminatedId);
       if (boot) {
-        const relScores: Record<number, number> = {};
-        castaways.forEach(c => { relScores[c.id] = c.stats.trust; });
+        const relScores = buildJuryRelScores(result.eliminatedId, castaways, relationships);
         addJuryMember({
           castawayId:         result.eliminatedId,
           eliminatedDay:      day,
@@ -456,26 +456,33 @@ export default function CouncilScreen({ navigation }: Props) {
   }
 
   // ── Fire-making helpers ────────────────────────────────────────────────────
-  function handleFireSavePick(savedId: number) {
-    setFireSavedId(savedId);
+  // Shared by the player-pick and NPC-auto-pick paths. Must handle <2
+  // competitors or the fire_making stage renders empty and the game softlocks.
+  function resolveFireCompetitors(savedId: number) {
     const alive = castaways.filter(c => !c.eliminated && !c.onRedemptionIsland);
     const competitors = alive.filter(c => c.id !== immuneId && c.id !== savedId);
     if (competitors.length >= 2) {
       setFireCompetitors([competitors[0].id, competitors[1].id]);
     } else if (competitors.length === 1) {
-      // Only 1 competitor (edge case) — they automatically lose, no challenge
-      handleFireResult(true, competitors[0].id, 0);
+      // No opponent to face — the lone non-saved castaway is eliminated
+      // outright by the immunity holder's decision.
+      handleFireResult(false, competitors[0].id, immuneId ?? savedId);
+    } else {
+      // Nobody left to send to fire — skip the council entirely.
+      advance();
+      navigation.goBack();
     }
+  }
+
+  function handleFireSavePick(savedId: number) {
+    setFireSavedId(savedId);
+    resolveFireCompetitors(savedId);
   }
 
   // Compute fire competitors once fireSavedId is set (for NPC auto-pick case)
   useEffect(() => {
     if (stage !== 'fire_making' || fireSavedId === null || fireCompetitors !== null) return;
-    const alive = castaways.filter(c => !c.eliminated && !c.onRedemptionIsland);
-    const competitors = alive.filter(c => c.id !== immuneId && c.id !== fireSavedId);
-    if (competitors.length >= 2) {
-      setFireCompetitors([competitors[0].id, competitors[1].id]);
-    }
+    resolveFireCompetitors(fireSavedId);
   }, [stage, fireSavedId, fireCompetitors]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // The fire-making bout itself (player-vs-NPC or NPC-vs-NPC spectate) is rendered
@@ -499,8 +506,7 @@ export default function CouncilScreen({ navigation }: Props) {
     if (gameMode === 'post-merge') {
       const boot = castaways.find(c => c.id === loseId);
       if (boot) {
-        const relScores: Record<number, number> = {};
-        castaways.forEach(c => { relScores[c.id] = c.stats.trust; });
+        const relScores = buildJuryRelScores(loseId, castaways, relationships);
         addJuryMember({
           castawayId:         loseId,
           eliminatedDay:      day,

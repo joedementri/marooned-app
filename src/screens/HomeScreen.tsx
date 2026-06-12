@@ -13,6 +13,7 @@ import CampScene from '../components/graphics/CampScene';
 import Portrait from '../components/atoms/Portrait';
 import { initials } from '../data/roster';
 import { PLAYER_ID } from '../utils/voteSimulator';
+import { estimateSeasonDays } from '../utils/seasonLength';
 import { C } from '../tokens/colors';
 import { F } from '../tokens/fonts';
 import { useTheme } from '../contexts/ThemeContext';
@@ -20,8 +21,6 @@ import type { ThemeColors } from '../contexts/ThemeContext';
 import type { Castaway } from '../data/roster';
 
 type Props = StackScreenProps<GameParamList, 'Home'>;
-
-const TOTAL_DAYS = 39;
 
 // ── Sub-components ─────────────────────────────────────────
 
@@ -118,6 +117,7 @@ export default function HomeScreen({ navigation }: Props) {
   const {
     playerName, playerTribeId, tribes, feed, castaways,
     playerIdolCount, playerAdvantages, playerImmunityWins, edgeIds,
+    gameSettings,
   } = useGameStore(
     useShallow(s => ({
       playerName:          s.playerName,
@@ -129,6 +129,7 @@ export default function HomeScreen({ navigation }: Props) {
       playerAdvantages:    s.playerAdvantages,
       playerImmunityWins:  s.playerImmunityWins,
       edgeIds:             s.edgeIds,
+      gameSettings:        s.gameSettings,
     }))
   );
 
@@ -147,7 +148,8 @@ export default function HomeScreen({ navigation }: Props) {
   const tribe = tribes.find(t => t.id === playerTribeId);
   const alive = castaways.filter(c => !c.eliminated);
   const recentFeed = feed.slice(0, 4);
-  const dayPct = Math.round((day / TOTAL_DAYS) * 100);
+  const totalDays = estimateSeasonDays(gameSettings);
+  const dayPct = Math.min(100, Math.round((day / totalDays) * 100));
 
   const npcsAlive  = alive.filter(c => c.id !== PLAYER_ID);
   const top3Loyal  = [...npcsAlive].sort((a, b) => b.stats.loyalty - a.stats.loyalty).slice(0, 3);

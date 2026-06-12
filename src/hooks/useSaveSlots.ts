@@ -17,6 +17,20 @@ export function useSaveSlots() {
     updateSlot(slotIndex, { playerName, day, difficulty, saveDate: new Date().toISOString() });
   }
 
+  // A version-matched save can still be truncated or hand-corrupted; applying
+  // it blind leaves the store in an invalid state. Check the load-bearing keys.
+  function isValidSave(saved: any): boolean {
+    return (
+      saved !== null &&
+      typeof saved === 'object' &&
+      Array.isArray(saved.castaways) && saved.castaways.length > 0 &&
+      typeof saved.day === 'number' &&
+      typeof saved.gameSeed === 'number' &&
+      saved.gameSettings && typeof saved.gameSettings.finaleSize === 'number' &&
+      saved.relationships && typeof saved.relationships === 'object'
+    );
+  }
+
   async function loadGame(slotIndex: number): Promise<boolean> {
     const raw = await AsyncStorage.getItem(SLOT_KEY(slotIndex));
     if (!raw) return false;
@@ -28,7 +42,12 @@ export function useSaveSlots() {
         clearSlot(slotIndex);
         return false;
       }
+      // Corrupt save: refuse to load but leave the slot intact for the user.
+      if (!isValidSave(saved)) return false;
       delete saved.__saveVersion;
+      // setState merges — reset first so any keys missing from the save fall
+      // back to clean defaults instead of the previously loaded game's state.
+      useGameStore.getState().resetGame();
       useGameStore.setState(saved);
       return true;
     } catch {

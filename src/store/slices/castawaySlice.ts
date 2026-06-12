@@ -3,6 +3,7 @@ import type { GameStore } from '../gameStore';
 import type { Castaway, CastawayStats } from '../../data/roster';
 import type { AdvantageType } from '../../data/advantages';
 import { PLAYER_ID } from '../../utils/voteSimulator';
+import { buildJuryRelScores } from '../../utils/juryRelScores';
 
 export interface CastawaySlice {
   castaways: Castaway[];
@@ -170,7 +171,7 @@ export const createCastawaySlice: StateCreator<GameStore, [], [], CastawaySlice>
             eliminatedDay: get().castaways.find(c => c.id === eid)?.eliminatedDay ?? day,
             eliminatedBy: [],
             bitternessFactor: 0.2,
-            relationshipScores: {},
+            relationshipScores: buildJuryRelScores(eid, get().castaways, get().relationships),
           });
           get().permanentEliminate(eid, day, []);
         });
