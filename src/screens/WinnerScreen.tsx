@@ -4,6 +4,7 @@ import type { StackScreenProps } from '@react-navigation/stack';
 import { useShallow } from 'zustand/react/shallow';
 import type { GameParamList } from '../navigation/types';
 import { useGameStore } from '../store/gameStore';
+import ConfettiBurst from '../components/game/ConfettiBurst';
 import { C } from '../tokens/colors';
 import { F } from '../tokens/fonts';
 
@@ -41,6 +42,7 @@ export default function WinnerScreen({ route, navigation }: Props) {
 
   return (
     <ScrollView style={styles.root} contentContainerStyle={styles.content}>
+      {playerWon && <ConfettiBurst />}
       {/* Banner */}
       <View style={styles.banner}>
         <Text style={styles.bannerEyebrow}>SOLE SURVIVOR</Text>

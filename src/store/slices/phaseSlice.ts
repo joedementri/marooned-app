@@ -1,8 +1,9 @@
 import type { StateCreator } from 'zustand';
 import type { GameStore } from '../gameStore';
-import { PLAYER_ID } from '../../utils/voteSimulator';
+import { PLAYER_ID, tallyVotes, breakTie } from '../../utils/voteSimulator';
 import { resolveTribal } from '../../utils/advantageResolver';
 import { simulateTribalVotes } from '../../engine/voteEngine';
+import { seeded } from '../../utils/seeded';
 
 export type DayPhase = 'morning' | 'redemption' | 'reward' | 'day' | 'immunity' | 'evening' | 'tribal' | 'sleep';
 export type GameMode = 'pre-merge' | 'post-merge' | 'final-tribal' | 'ended';
@@ -70,14 +71,45 @@ export const createPhaseSlice: StateCreator<GameStore, [], [], PhaseSlice> = (se
             scopeTag: losingTribe.id,
           });
           ctx.consumed.forEach(c => removeCastawayAdvantage(c.holderId, c.type));
-          const result = resolveTribal(ctx.votes, ctx.npcPlays, castaways, tribeMembers.length, day);
-          if (result.eliminatedId !== PLAYER_ID && result.eliminatedId !== -1) {
-            const voterIds = Object.entries(ctx.votes)
-              .filter(([k]) => Number(k) === result.eliminatedId)
+          const result = resolveTribal(ctx.votes, ctx.npcPlays, castaways, tribeMembers.length, day, { breakTies: false });
+
+          // Mirror the on-screen tie rules off-screen: one silent revote
+          // among the non-tied voters, then rocks.
+          let eliminatedId = result.eliminatedId;
+          let finalVotes = ctx.votes;
+          if (result.tieIds && result.tieIds.length > 1) {
+            const tieIds = result.tieIds;
+            const rctx = simulateTribalVotes({
+              voters: tribeMembers.filter(c => !tieIds.includes(c.id)),
+              eligibleTargets: tieIds,
+              playerVote: null,
+              relationships,
+              alliances,
+              castaways,
+              day,
+              gameSeed,
+              scopeTag: `revote-${losingTribe.id}`,
+            });
+            const tally = tallyVotes(rctx.votes);
+            const rng = seeded(day * 7_773);
+            const castMap = new Map(castaways.map(c => [c.id, c]));
+            if (tally.length === 0) {
+              eliminatedId = breakTie(tieIds, castMap, rng);
+            } else {
+              const top = tally[0].count;
+              const tops = tally.filter(t => t.count === top).map(t => t.id);
+              eliminatedId = tops.length === 1 ? tops[0] : breakTie(tops, castMap, rng);
+              finalVotes = rctx.votes;
+            }
+          }
+
+          if (eliminatedId !== PLAYER_ID && eliminatedId !== -1) {
+            const voterIds = Object.entries(finalVotes)
+              .filter(([k]) => Number(k) === eliminatedId)
               .flatMap(([, v]) => v);
-            eliminateCastaway(result.eliminatedId, day, voterIds);
-            applyTribalAftermathToStore(ctx.votes, result.eliminatedId);
-            const bootedName = castaways.find(c => c.id === result.eliminatedId)?.name ?? 'Someone';
+            eliminateCastaway(eliminatedId, day, voterIds);
+            applyTribalAftermathToStore(finalVotes, eliminatedId);
+            const bootedName = castaways.find(c => c.id === eliminatedId)?.name ?? 'Someone';
             addFeedEntry({
               id: `opp-tribal-${losingTribe.id}-day${day}`,
               day,

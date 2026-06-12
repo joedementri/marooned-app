@@ -12,6 +12,7 @@ import Portrait from '../components/atoms/Portrait';
 import ParchmentCard from '../components/game/ParchmentCard';
 import TribalCouncilScene from '../components/graphics/TribalCouncilScene';
 import { getRel } from '../engine/socialEngine';
+import { useSaveSlots } from '../hooks/useSaveSlots';
 import { C } from '../tokens/colors';
 import { F } from '../tokens/fonts';
 import { PLAYER_ID } from '../utils/voteSimulator';
@@ -131,6 +132,7 @@ export default function FinalTribalScreen({ navigation }: Props) {
   const revealTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { playSfx } = useAudio('council');
   const hap = useHaptics();
+  const { saveCurrentGame } = useSaveSlots();
 
   const {
     castaways, jury, playerName, day, gameSettings, relationships,
@@ -203,28 +205,53 @@ export default function FinalTribalScreen({ navigation }: Props) {
     setStage('reveal');
   }
 
-  // ── Parchment reveal timing ──────────────────────────────────────────────────
+  // ── Parchment reveal timing — slows on the brink, lands hard on the clinch ──
   useEffect(() => {
     if (stage !== 'reveal') return;
     if (flippedCount >= parchments.length) {
       const t = setTimeout(() => setStage('winner'), 1800);
       return () => clearTimeout(t);
     }
-    const delay = flippedCount === 0 ? 1000 : 1500;
+
+    const tallySoFar: Record<number, number> = {};
+    for (let i = 0; i < flippedCount; i++) {
+      const p = parchments[i];
+      tallySoFar[p.forId] = (tallySoFar[p.forId] ?? 0) + 1;
+    }
+    const votesToWin = Math.floor(parchments.length / 2) + 1;
+    const winnerId = juryResult?.winnerId;
+    const alreadyClinched = winnerId != null && (tallySoFar[winnerId] ?? 0) >= votesToWin;
+    const next = parchments[flippedCount];
+    const isClinch =
+      !alreadyClinched && next != null && next.forId === winnerId &&
+      (tallySoFar[next.forId] ?? 0) + 1 >= votesToWin;
+    const onBrink = !alreadyClinched &&
+      Object.values(tallySoFar).some(n => n === votesToWin - 1);
+
+    let delay = flippedCount === 0 ? 1000 : 1300;
+    if (alreadyClinched) delay = 800;        // formality votes read quickly
+    else if (onBrink) { delay = 2200; hap.warning(); } // someone is one away
+
     revealTimerRef.current = setTimeout(() => {
-      hap.medium();
-      playSfx('parchment');
+      if (isClinch) {
+        hap.heavy();
+        playSfx('win');
+      } else {
+        hap.medium();
+        playSfx('parchment');
+      }
       setFlippedCount(n => n + 1);
     }, delay);
     return () => {
       if (revealTimerRef.current) clearTimeout(revealTimerRef.current);
     };
-  }, [stage, flippedCount, parchments.length]);
+  }, [stage, flippedCount, parchments.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Stage: winner — navigate to WinnerScreen ─────────────────────────────────
   useEffect(() => {
     if (stage !== 'winner' || !juryResult) return;
     setGameMode('ended');
+    saveCurrentGame().catch(() => {});
     addFeedEntry({
       id:   `winner-day${day}`,
       day,

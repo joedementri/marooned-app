@@ -60,6 +60,71 @@ function blocConsensus(
   return best?.id ?? null;
 }
 
+// Deterministic part of a voter's preference for one candidate (no chaos noise).
+// Shared by the full simulation and predictVoterTarget so a "read" of an NPC
+// matches how they'd actually lean at tribal.
+function scoreCandidateForVoter(
+  voter: Castaway,
+  id: number,
+  castMap: Map<number, Castaway>,
+  relationships: Record<string, Relationship>,
+  bloc: { targetId: number; strength: number } | undefined,
+  sharedPlans: VoteEngineInput['sharedPlans'],
+  day: number,
+): number | null {
+  const t = castMap.get(id);
+  if (!t) return null;
+  const r = getRel(relationships, voter.id, id);
+  let s = perceivedThreat(t) * 1.4;
+  s += (-r.affinity) * 1.2;
+  s += r.grudge * 1.6;
+  if (bloc && bloc.targetId === id) s += 0.8 + bloc.strength * 1.2;
+  // Follow the player's lead ONLY if the player whispered a plan to this
+  // voter (no mind-reading the secret ballot), and only toward the target
+  // the player named — which may not be who the player actually votes for.
+  const plan = sharedPlans?.[voter.id];
+  if (plan && plan.day === day && plan.targetId === id) {
+    const trustPlayer = getRel(relationships, voter.id, PLAYER_ID).trust;
+    if (voter.archetype === 'loyalist' || trustPlayer > 0.6) s += 0.6;
+  }
+  if (voter.archetype === 'schemer' || voter.archetype === 'mastermind') s += t.stats.mental * 0.4;
+  if (voter.archetype === 'floater' && bloc && bloc.targetId === id) s += 0.5;
+  return s;
+}
+
+// Best guess at who a single NPC is leaning toward tonight, without running
+// the full council simulation (used when the player asks someone their plan).
+// Excludes chaos noise — it's a read of intent, not a guarantee.
+export function predictVoterTarget(input: {
+  voter: Castaway;
+  eligibleTargets: number[];
+  relationships: Record<string, Relationship>;
+  alliances: Alliance[];
+  castaways: Castaway[];
+  day: number;
+  sharedPlans?: VoteEngineInput['sharedPlans'];
+}): number | null {
+  const { voter, eligibleTargets, relationships, alliances, castaways, day, sharedPlans } = input;
+  const castMap = new Map(castaways.map(c => [c.id, c]));
+
+  let bloc: { targetId: number; strength: number } | undefined;
+  for (const alliance of alliances) {
+    if (!alliance.memberIds.includes(voter.id)) continue;
+    const target = blocConsensus(alliance, eligibleTargets, castMap, relationships);
+    if (target == null) continue;
+    if (!bloc || alliance.strength > bloc.strength) bloc = { targetId: target, strength: alliance.strength };
+  }
+
+  let best: { id: number; score: number } | null = null;
+  for (const id of eligibleTargets) {
+    if (id === voter.id) continue;
+    const s = scoreCandidateForVoter(voter, id, castMap, relationships, bloc, sharedPlans, day);
+    if (s == null) continue;
+    if (!best || s > best.score) best = { id, score: s };
+  }
+  return best?.id ?? null;
+}
+
 export function simulateTribalVotes(input: VoteEngineInput): VoteContext {
   const { voters, eligibleTargets, playerVote, relationships, alliances, castaways, day, gameSeed, scopeTag, sharedPlans } = input;
   const rng = gameRng(gameSeed, `vote-d${day}-${scopeTag ?? 'main'}`);
@@ -96,25 +161,10 @@ export function simulateTribalVotes(input: VoteEngineInput): VoteContext {
 
     let best: { id: number; score: number } | null = null;
     for (const id of candidates) {
-      const t = castMap.get(id);
-      if (!t) continue;
-      const r = getRel(relationships, voter.id, id);
-      let s = perceivedThreat(t) * 1.4;
-      s += (-r.affinity) * 1.2;
-      s += r.grudge * 1.6;
-      if (bloc && bloc.targetId === id) s += 0.8 + bloc.strength * 1.2;
-      // Follow the player's lead ONLY if the player whispered a plan to this
-      // voter (no mind-reading the secret ballot), and only toward the target
-      // the player named — which may not be who the player actually votes for.
-      const plan = sharedPlans?.[voter.id];
-      if (plan && plan.day === day && plan.targetId === id) {
-        const trustPlayer = getRel(relationships, voter.id, PLAYER_ID).trust;
-        if (voter.archetype === 'loyalist' || trustPlayer > 0.6) s += 0.6;
-      }
-      if (voter.archetype === 'schemer' || voter.archetype === 'mastermind') s += t.stats.mental * 0.4;
-      if (voter.archetype === 'floater' && bloc && bloc.targetId === id) s += 0.5;
+      const base = scoreCandidateForVoter(voter, id, castMap, relationships, bloc, sharedPlans, day);
+      if (base == null) continue;
       const chaos = (voter.archetype === 'wildcard' || voter.archetype === 'pessimist') ? rng() * 1.5 : rng() * 0.4;
-      s += chaos;
+      const s = base + chaos;
       if (!best || s > best.score) best = { id, score: s };
     }
     if (best) {

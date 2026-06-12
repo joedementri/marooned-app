@@ -14,13 +14,14 @@ export interface AdvantagePlay {
 export interface TribalResult {
   originalVotes: VoteMap;
   resolvedVotes: VoteMap;
-  eliminatedId: number;            // 0 = player, 1-18 = NPC
+  eliminatedId: number;            // 0 = player, 1-18 = NPC; -1 when a tie is left unresolved
   idolPlayed: boolean;
   idolPlayerId: number | null;
   idolNullified: boolean;
   safetyDeparted: number[];        // castaway ids who left before vote
   stolenVoterIds: number[];        // voters whose vote was stolen
   extraVoteActorId: number | null;
+  tieIds?: number[];               // set (with eliminatedId -1) when breakTies=false and the vote deadlocked
 }
 
 export function resolveTribal(
@@ -29,6 +30,7 @@ export function resolveTribal(
   castaways: Castaway[],
   aliveCount: number,
   day: number,
+  options?: { breakTies?: boolean }, // default true; false returns tieIds for a revote flow
 ): TribalResult {
   const castawayMap = new Map<number, Castaway>(castaways.map(c => [c.id, c]));
   const rng = seeded(day * 5_555);
@@ -119,9 +121,14 @@ export function resolveTribal(
   const topCount = tally[0].count;
   const topIds = tally.filter(t => t.count === topCount).map(t => t.id);
 
-  result.eliminatedId = topIds.length === 1
-    ? topIds[0]
-    : breakTie(topIds, castawayMap, rng);
+  if (topIds.length === 1) {
+    result.eliminatedId = topIds[0];
+  } else if (options?.breakTies === false) {
+    // Hand the tie back to the caller for a proper revote.
+    result.tieIds = topIds;
+  } else {
+    result.eliminatedId = breakTie(topIds, castawayMap, rng);
+  }
 
   return result;
 }

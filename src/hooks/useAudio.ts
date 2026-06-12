@@ -3,7 +3,7 @@ import { Audio } from 'expo-av';
 import { useSettingsStore } from '../store/settingsStore';
 
 export type MusicContext = 'camp' | 'council';
-export type SfxKey = 'parchment' | 'win' | 'lose' | 'torch';
+export type SfxKey = 'parchment' | 'win' | 'lose' | 'torch' | 'idol';
 
 // Static requires resolved at bundle time
 const MUSIC_SOURCES = {
@@ -16,6 +16,8 @@ const SFX_SOURCES = {
   win:       require('../../assets/sounds/sfx-win.mp3'),
   lose:      require('../../assets/sounds/sfx-lose.mp3'),
   torch:     require('../../assets/sounds/sfx-torch.mp3'),
+  // Placeholder stinger — swap for a dedicated sfx-idol.mp3 when one exists.
+  idol:      require('../../assets/sounds/sfx-win.mp3'),
 } as const;
 
 async function configureAudio() {

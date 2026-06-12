@@ -1,25 +1,29 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import type { StackScreenProps } from '@react-navigation/stack';
 import { useAudio } from '../hooks/useAudio';
 import { useHaptics } from '../hooks/useHaptics';
 import { useShallow } from 'zustand/react/shallow';
 import type { GameParamList } from '../navigation/types';
 import { useGameStore } from '../store/gameStore';
-import { PLAYER_ID } from '../utils/voteSimulator';
+import { PLAYER_ID, tallyVotes, breakTie } from '../utils/voteSimulator';
 import type { VoteMap } from '../utils/voteSimulator';
 import { resolveTribal } from '../utils/advantageResolver';
 import type { AdvantagePlay, TribalResult } from '../utils/advantageResolver';
-import { simulateTribalVotes } from '../engine/voteEngine';
+import { simulateTribalVotes, predictVoterTarget } from '../engine/voteEngine';
+import { getRel } from '../engine/socialEngine';
 import type { AdvantageType } from '../data/advantages';
 import { ADVANTAGE_DEFS } from '../data/advantages';
+import { getFinalWords } from '../data/finalWords';
 import { seeded } from '../utils/seeded';
 import { initials } from '../data/roster';
 import type { Castaway } from '../data/roster';
 import type { ArchetypeKey } from '../data/archetypes';
 import { usePhase } from '../hooks/usePhase';
+import { useSaveSlots } from '../hooks/useSaveSlots';
 import Portrait from '../components/atoms/Portrait';
 import ParchmentCard from '../components/game/ParchmentCard';
+import VoteParchment from '../components/game/VoteParchment';
 import AdvantageCard from '../components/game/AdvantageCard';
 import FireGame from '../minigames/FireGame';
 import TribalCouncilScene from '../components/graphics/TribalCouncilScene';
@@ -34,10 +38,13 @@ import { F } from '../tokens/fonts';
 type Props = StackScreenProps<GameParamList, 'Council'>;
 type Stage =
   | 'talk'
+  | 'whisper'
   | 'pre_vote'
   | 'vote'
   | 'post_vote'
+  | 'idol_play'
   | 'parchment'
+  | 'revote'
   | 'snuffed'
   | 'fire_making'
   | 'fire_result';
@@ -124,9 +131,22 @@ export default function CouncilScreen({ navigation }: Props) {
   const [rawVotesRef, setRawVotesRef]     = useState<VoteMap | null>(null);
   const [npcPlaysRef, setNpcPlaysRef]     = useState<AdvantagePlay[]>([]);
   const [npcConsumedRef, setNpcConsumedRef] = useState<Array<{ holderId: number; type: AdvantageType }>>([]);
+  const [narrationRef, setNarrationRef]   = useState<string[]>([]);
   const [tribalResult, setTribalResult]   = useState<TribalResult | null>(null);
   const [parchmentList, setParchmentList] = useState<Array<{ name: string; voided: boolean; targetId: number }>>([]);
   const [revealIndex, setRevealIndex]     = useState(0);
+
+  // Whisper state — two whisper actions per tribal
+  const [whispersLeft, setWhispersLeft]   = useState(2);
+  const [shareWithId, setShareWithId]     = useState<number | null>(null);
+  const [askAnswers, setAskAnswers]       = useState<Record<number, string>>({});
+
+  // Idol-moment state — advantage drama shown line by line before the votes
+  const [dramaLines, setDramaLines]       = useState<string[]>([]);
+  const [dramaIdx, setDramaIdx]           = useState(0);
+
+  // Revote state — true when a double deadlock was settled by rocks
+  const [rocksDrawn, setRocksDrawn]       = useState(false);
 
   // Fire-making state
   const [fireSavedId, setFireSavedId]         = useState<number | null>(null);
@@ -145,7 +165,6 @@ export default function CouncilScreen({ navigation }: Props) {
     return tally;
   }, [revealIndex, parchmentList]);
 
-  const cardAnim = useRef(new Animated.Value(0)).current;
   const revealTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { playSfx } = useAudio('council');
   const hap = useHaptics();
@@ -155,7 +174,7 @@ export default function CouncilScreen({ navigation }: Props) {
     playerName, playerTribeId, playerAdvantages, playerIdolCount,
     immunityWinnerId, difficulty, gameSettings,
     relationships, alliances, gameSeed, edgeIds, sharedPlans,
-    applyRelDeltas, addIntel, syncPlayerFacingStats,
+    applyRelDeltas, addIntel, syncPlayerFacingStats, setSharedPlan,
     addFeedEntry, eliminateCastaway, permanentEliminate, addJuryMember,
     removePlayerAdvantage, removeCastawayAdvantage, setPlayerIdolCount, setGameMode,
     applyTribalAftermathToStore, bumpPlayerThreat,
@@ -180,6 +199,7 @@ export default function CouncilScreen({ navigation }: Props) {
       applyRelDeltas:       s.applyRelDeltas,
       addIntel:             s.addIntel,
       syncPlayerFacingStats: s.syncPlayerFacingStats,
+      setSharedPlan:        s.setSharedPlan,
       addFeedEntry:         s.addFeedEntry,
       eliminateCastaway:    s.eliminateCastaway,
       permanentEliminate:   s.permanentEliminate,
@@ -291,11 +311,75 @@ export default function CouncilScreen({ navigation }: Props) {
       setStage('fire_making');
       return;
     }
+    setStage('whisper');
+  }
+
+  function handleWhisperDone() {
     if (preVoteAdvantages.length > 0) {
       setStage('pre_vote');
     } else {
       setStage('vote');
     }
+  }
+
+  // ── Whisper actions ──────────────────────────────────────────────────────
+  function nameOf(id: number): string {
+    return id === PLAYER_ID ? playerName : (castaways.find(c => c.id === id)?.name.split(' ')[0] ?? '?');
+  }
+
+  // Tell an NPC who you're (supposedly) voting for. Loyal/high-trust allies
+  // will lean toward that name at the vote — and after the votes are read,
+  // they'll know whether you kept your word.
+  function confirmSharePlan(targetId: number) {
+    if (shareWithId === null || whispersLeft <= 0) return;
+    setSharedPlan(shareWithId, targetId, day);
+    applyRelDeltas([{ a: shareWithId, b: PLAYER_ID, d: { trust: 0.04, lastEventDay: day } }]);
+    setShareWithId(null);
+    setWhispersLeft(n => n - 1);
+    hap.light();
+  }
+
+  // Ask an NPC who they're voting for. Honest or trusting castaways give a
+  // real read of their lean; the rest name a decoy. Nobody admits to "you".
+  function askPlan(npc: Castaway) {
+    if (whispersLeft <= 0 || askAnswers[npc.id]) return;
+    const eligible = [
+      ...targets.map(t => t.id),
+      ...(immuneId !== PLAYER_ID ? [PLAYER_ID] : []),
+    ];
+    const predicted = predictVoterTarget({
+      voter: npc, eligibleTargets: eligible, relationships, alliances, castaways, day, sharedPlans,
+    });
+    const honest =
+      predicted !== null && predicted !== PLAYER_ID &&
+      (npc.personality.honesty > 0.45 || getRel(relationships, npc.id, PLAYER_ID).trust > 0.6);
+    const rng = seeded(day * 9091 + npc.id * 53);
+    let namedId = predicted;
+    if (!honest) {
+      const decoys = eligible.filter(id => id !== predicted && id !== npc.id && id !== PLAYER_ID);
+      if (decoys.length > 0) namedId = decoys[Math.floor(rng() * decoys.length)];
+    }
+    if (namedId === null || namedId === PLAYER_ID) {
+      setAskAnswers(prev => ({ ...prev, [npc.id]: "I'm still feeling it out." }));
+      setWhispersLeft(n => n - 1);
+      hap.light();
+      return;
+    }
+    const answer = `I'm writing ${nameOf(namedId)} tonight.`;
+    setAskAnswers(prev => ({ ...prev, [npc.id]: answer }));
+    addIntel([{
+      id: `whisper-d${day}-${npc.id}`,
+      day,
+      kind: 'told',
+      sourceId: npc.id,
+      subjectIds: [npc.id],
+      claim: { type: 'vote-target', voterId: npc.id, targetId: namedId },
+      text: `${npc.name.split(' ')[0]} says they're voting ${nameOf(namedId)} tonight.`,
+      truthful: namedId === predicted,
+      confidence: honest ? 'medium' : 'low',
+    }]);
+    setWhispersLeft(n => n - 1);
+    hap.light();
   }
 
   function handlePreVoteDone() {
@@ -335,16 +419,17 @@ export default function CouncilScreen({ navigation }: Props) {
     setRawVotesRef(ctx.votes);
     setNpcPlaysRef(ctx.npcPlays);
     setNpcConsumedRef(ctx.consumed);
+    setNarrationRef(ctx.narration);
     if (postVoteAdvantages.length > 0) {
       setStage('post_vote');
     } else {
-      runCouncil(targetId, ctx.votes, ctx.npcPlays, ctx.consumed);
+      runCouncil(targetId, ctx.votes, ctx.npcPlays, ctx.consumed, ctx.narration);
     }
   }
 
   function handlePostVoteDone() {
     if (rawVotesRef && playerVote !== null) {
-      runCouncil(playerVote, rawVotesRef, npcPlaysRef, npcConsumedRef);
+      runCouncil(playerVote, rawVotesRef, npcPlaysRef, npcConsumedRef, narrationRef);
     }
   }
 
@@ -353,7 +438,8 @@ export default function CouncilScreen({ navigation }: Props) {
     setRawVotesRef(ctx.votes);
     setNpcPlaysRef(ctx.npcPlays);
     setNpcConsumedRef(ctx.consumed);
-    runCouncil(playerVoteTarget, ctx.votes, ctx.npcPlays, ctx.consumed);
+    setNarrationRef(ctx.narration);
+    runCouncil(playerVoteTarget, ctx.votes, ctx.npcPlays, ctx.consumed, ctx.narration);
   }
 
   function runCouncil(
@@ -361,6 +447,7 @@ export default function CouncilScreen({ navigation }: Props) {
     rawVotes: VoteMap,
     npcPlays: AdvantagePlay[],
     npcConsumed: Array<{ holderId: number; type: AdvantageType }>,
+    npcNarration: string[] = [],
   ) {
     const plays: AdvantagePlay[] = [];
     if (playerSafe) {
@@ -377,7 +464,8 @@ export default function CouncilScreen({ navigation }: Props) {
     // NPC advantage plays decided by the vote engine.
     plays.push(...npcPlays);
 
-    const result = resolveTribal(rawVotes, plays, castaways, aliveCount, day);
+    // Leave ties unresolved — a deadlock triggers a real revote stage.
+    const result = resolveTribal(rawVotes, plays, castaways, aliveCount, day, { breakTies: false });
     setTribalResult(result);
 
     // Consume the advantages NPCs played.
@@ -392,36 +480,6 @@ export default function CouncilScreen({ navigation }: Props) {
     // a strategic threat in the eyes of the remaining castaways.
     const playerPublicPlays = plays.filter(p => p.actorId === PLAYER_ID).length;
     if (playerPublicPlays > 0) bumpPlayerThreat(0.1 * playerPublicPlays);
-
-    const list = buildDramaticOrder(
-      rawVotes,
-      result.eliminatedId,
-      result.idolPlayed,
-      result.idolPlayerId,
-      result.resolvedVotes,
-    );
-
-    const named = list.map(p => {
-      const name = p.targetId === PLAYER_ID
-        ? playerName
-        : (castaways.find(c => c.id === p.targetId)?.name ?? '?');
-      return { ...p, name };
-    });
-
-    setParchmentList(named);
-    setRevealIndex(0);
-
-    eliminateCastaway(
-      result.eliminatedId,
-      day,
-      Object.entries(rawVotes)
-        .filter(([k]) => Number(k) === result.eliminatedId)
-        .flatMap(([, v]) => v),
-    );
-
-    // Update the relationship graph: allies of the booted resent the voters,
-    // blindsided alliances fracture.
-    applyTribalAftermathToStore(rawVotes, result.eliminatedId);
 
     // Whispered plans come due. Votes are read aloud, so anyone the player
     // told a plan can tell whether the player kept their word.
@@ -457,36 +515,6 @@ export default function CouncilScreen({ navigation }: Props) {
       if (lieIntel.length) addIntel(lieIntel);
     }
 
-    if (gameMode === 'post-merge') {
-      const boot = castaways.find(c => c.id === result.eliminatedId);
-      if (boot) {
-        const relScores = buildJuryRelScores(result.eliminatedId, castaways, relationships);
-        addJuryMember({
-          castawayId:         result.eliminatedId,
-          eliminatedDay:      day,
-          eliminatedBy:       Object.entries(rawVotes)
-            .filter(([k]) => Number(k) === result.eliminatedId)
-            .flatMap(([, v]) => v),
-          bitternessFactor:   playerVoteTarget === result.eliminatedId ? 0.8 : 0.3,
-          relationshipScores: relScores,
-        });
-      }
-    }
-
-    const bootName = result.eliminatedId === PLAYER_ID
-      ? 'You'
-      : (castaways.find(c => c.id === result.eliminatedId)?.name ?? 'Someone');
-
-    addFeedEntry({
-      id:   `tribal-day${day}-boot${result.eliminatedId}`,
-      day,
-      phase,
-      text: result.eliminatedId === PLAYER_ID
-        ? 'The tribe has spoken. You have been voted out.'
-        : `${bootName} has been voted out on Day ${day}.`,
-      type: 'vote',
-    });
-
     if (result.idolPlayed) {
       const idolPlayerName = result.idolPlayerId === PLAYER_ID
         ? playerName
@@ -500,6 +528,159 @@ export default function CouncilScreen({ navigation }: Props) {
       });
     }
 
+    const tied = result.tieIds != null && result.tieIds.length > 1;
+    if (!tied) {
+      finalizeBoot(result.eliminatedId, rawVotes, playerVoteTarget);
+    }
+
+    // Round-one parchments. On a tie there's no decisive vote; the reveal
+    // effect routes to the revote stage instead of the snuff.
+    setParchmentList(nameParchments(buildDramaticOrder(
+      rawVotes,
+      tied ? -1 : result.eliminatedId,
+      result.idolPlayed,
+      result.idolPlayerId,
+      result.resolvedVotes,
+    )));
+    setRevealIndex(0);
+
+    // Advantage drama gets its own beat before the votes are read.
+    const lines: string[] = [];
+    for (const p of plays) {
+      if (p.actorId === PLAYER_ID && p.type !== 'safety_without_power') {
+        lines.push(`You stand and play ${ADVANTAGE_DEFS[p.type].name}.`);
+      }
+    }
+    lines.push(...npcNarration);
+    if (lines.length > 0) {
+      setDramaLines(lines);
+      setDramaIdx(0);
+      setStage('idol_play');
+    } else {
+      setStage('parchment');
+    }
+  }
+
+  function nameParchments(list: Array<{ name: string; voided: boolean; targetId: number }>) {
+    return list.map(p => ({
+      ...p,
+      name: p.targetId === PLAYER_ID
+        ? playerName
+        : (castaways.find(c => c.id === p.targetId)?.name ?? '?'),
+    }));
+  }
+
+  // Everything that happens once a boot is actually decided: the elimination
+  // itself, relationship fallout, jury bookkeeping, and the narrative feed.
+  function finalizeBoot(eliminatedId: number, votesRecord: VoteMap, playerVoteTarget: number | null) {
+    const votersAgainst = Object.entries(votesRecord)
+      .filter(([k]) => Number(k) === eliminatedId)
+      .flatMap(([, v]) => v);
+
+    eliminateCastaway(eliminatedId, day, votersAgainst);
+
+    // Update the relationship graph: allies of the booted resent the voters,
+    // blindsided alliances fracture.
+    applyTribalAftermathToStore(votesRecord, eliminatedId);
+
+    if (gameMode === 'post-merge') {
+      const boot = castaways.find(c => c.id === eliminatedId);
+      if (boot) {
+        const relScores = buildJuryRelScores(eliminatedId, castaways, relationships);
+        addJuryMember({
+          castawayId:         eliminatedId,
+          eliminatedDay:      day,
+          eliminatedBy:       votersAgainst,
+          bitternessFactor:   playerVoteTarget === eliminatedId ? 0.8 : 0.3,
+          relationshipScores: relScores,
+        });
+      }
+    }
+
+    const bootName = eliminatedId === PLAYER_ID
+      ? 'You'
+      : (castaways.find(c => c.id === eliminatedId)?.name ?? 'Someone');
+
+    addFeedEntry({
+      id:   `tribal-day${day}-boot${eliminatedId}`,
+      day,
+      phase,
+      text: eliminatedId === PLAYER_ID
+        ? 'The tribe has spoken. You have been voted out.'
+        : `${bootName} has been voted out on Day ${day}.`,
+      type: 'vote',
+    });
+
+    if (eliminatedId !== PLAYER_ID) {
+      const boot = castaways.find(c => c.id === eliminatedId);
+      if (boot) {
+        const goesToTwist =
+          (gameSettings.twist === 'redemption' && gameMode === 'pre-merge') ||
+          (gameSettings.twist === 'edge' && (gameSettings.edgePreMerge || gameMode === 'post-merge'));
+        addFeedEntry({
+          id: `finalwords-day${day}-${boot.id}`,
+          day,
+          phase,
+          text: `${boot.name.split(' ')[0]}'s final words: "${getFinalWords(boot.archetype, boot.id, day, goesToTwist)}"`,
+          type: 'vote',
+        });
+      }
+    }
+  }
+
+  // ── Revote: a deadlocked council votes again, only between the tied ──────
+  function runRevote(playerRevote: number | null) {
+    if (!tribalResult?.tieIds) return;
+    const tieIds = tribalResult.tieIds;
+    const revoters = councilMembers.filter(c => !tieIds.includes(c.id));
+    const ctx = simulateTribalVotes({
+      voters: revoters,
+      eligibleTargets: tieIds,
+      playerVote: tieIds.includes(PLAYER_ID) ? null : playerRevote,
+      relationships,
+      alliances,
+      castaways,
+      day,
+      gameSeed,
+      scopeTag: `revote-${gameMode === 'pre-merge' ? playerTribeId : 'merge'}`,
+      sharedPlans,
+    });
+    // Advantages were spent in round one — the revote is votes only.
+    const tally = tallyVotes(ctx.votes);
+    const rng = seeded(day * 7_773);
+    const castMap = new Map(castaways.map(c => [c.id, c]));
+    let eliminatedId: number;
+    let rocks = false;
+    if (tally.length === 0) {
+      eliminatedId = breakTie(tieIds, castMap, rng);
+      rocks = true;
+    } else {
+      const top = tally[0].count;
+      const tops = tally.filter(t => t.count === top).map(t => t.id);
+      if (tops.length === 1) {
+        eliminatedId = tops[0];
+      } else {
+        eliminatedId = breakTie(tops, castMap, rng);
+        rocks = true;
+      }
+    }
+
+    setRocksDrawn(rocks);
+    if (rocks) {
+      addFeedEntry({
+        id: `rocks-day${day}`,
+        day,
+        phase,
+        text: 'Deadlocked again — the boot came down to rocks.',
+        type: 'vote',
+      });
+    }
+
+    setTribalResult({ ...tribalResult, eliminatedId, tieIds: undefined, resolvedVotes: ctx.votes });
+    finalizeBoot(eliminatedId, ctx.votes, playerRevote ?? playerVote);
+
+    setParchmentList(nameParchments(buildDramaticOrder(ctx.votes, eliminatedId, false, null, ctx.votes)));
+    setRevealIndex(0);
     setStage('parchment');
   }
 
@@ -579,18 +760,58 @@ export default function CouncilScreen({ navigation }: Props) {
     setStage('fire_result');
   }
 
-  // ── Parchment reveal timing ─────────────────────────────────────────────
+  // ── Idol-moment reveal timing ────────────────────────────────────────────
+  useEffect(() => {
+    if (stage !== 'idol_play') return;
+    if (dramaIdx === 0) {
+      hap.heavy();
+      playSfx('idol');
+    }
+    if (dramaIdx >= dramaLines.length) {
+      const t = setTimeout(() => setStage('parchment'), 1200);
+      return () => clearTimeout(t);
+    }
+    const t = setTimeout(() => {
+      hap.medium();
+      setDramaIdx(n => n + 1);
+    }, dramaIdx === 0 ? 600 : 1500);
+    return () => clearTimeout(t);
+  }, [stage, dramaIdx, dramaLines.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Parchment reveal timing — pacing tightens as the vote gets close ─────
   useEffect(() => {
     if (stage !== 'parchment') return;
     if (revealIndex >= parchmentList.length) {
-      const t = setTimeout(() => setStage('snuffed'), 1800);
+      const deadlocked = tribalResult?.tieIds != null && tribalResult.tieIds.length > 1;
+      const t = setTimeout(() => setStage(deadlocked ? 'revote' : 'snuffed'), 1800);
       return () => clearTimeout(t);
     }
-    const delay = revealIndex === 0 ? 900 : 1400;
+
+    const isDecisive = revealIndex === parchmentList.length - 1;
+    const halfRead = revealIndex >= parchmentList.length / 2;
+    const counts = Object.values(runningTally).sort((a, b) => b - a);
+    const margin = (counts[0] ?? 0) - (counts[1] ?? 0);
+
+    let delay = revealIndex === 0 ? 900 : 1100;
+    if (halfRead && margin <= 1) delay = 1800; // neck and neck — let it breathe
+    if (isDecisive) {
+      delay = 2600; // the vote that decides it gets a long beat...
+      hap.warning();
+    }
+
     revealTimer.current = setTimeout(() => {
-      cardAnim.setValue(0);
-      Animated.timing(cardAnim, { toValue: 1, duration: 400, useNativeDriver: true }).start();
-      hap.medium();
+      const next = parchmentList[revealIndex];
+      if (isDecisive) {
+        hap.heavy();
+      } else if (next && !next.voided) {
+        // A vote that pulls someone level with the leader stings a little more.
+        const newCount = (runningTally[next.targetId] ?? 0) + 1;
+        const tiesLeader = Object.entries(runningTally)
+          .some(([id, n]) => Number(id) !== next.targetId && n === newCount);
+        if (tiesLeader) hap.medium(); else hap.light();
+      } else {
+        hap.light();
+      }
       playSfx('parchment');
       setRevealIndex(n => n + 1);
     }, delay);
@@ -604,8 +825,11 @@ export default function CouncilScreen({ navigation }: Props) {
   }, [stage]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const { advance } = usePhase();
+  const { saveCurrentGame } = useSaveSlots();
 
   function handleDone() {
+    // Checkpoint the slot after every tribal so a crash can't undo the vote.
+    saveCurrentGame().catch(() => {});
     const eliminated = stage === 'fire_result' ? fireLoserId : tribalResult?.eliminatedId;
     if (eliminated === PLAYER_ID) {
       // Edge of Extinction: a voted-out player with a re-entry shot goes to the Edge.
@@ -687,10 +911,13 @@ export default function CouncilScreen({ navigation }: Props) {
         <Text style={styles.eyebrow}>TRIBAL COUNCIL · DAY {day}</Text>
         <Text style={styles.title}>
           {stage === 'talk'         ? 'THE COUNCIL SPEAKS'    :
+           stage === 'whisper'      ? 'WHISPERS IN THE DARK'  :
            stage === 'pre_vote'     ? 'PLAY AN ADVANTAGE?'    :
            stage === 'vote'         ? 'CAST YOUR VOTE'        :
            stage === 'post_vote'    ? 'BEFORE THE VOTES...'   :
+           stage === 'idol_play'    ? 'A PLAY AT THE URN'     :
            stage === 'parchment'    ? "I'LL READ THE VOTES"   :
+           stage === 'revote'       ? 'WE HAVE A TIE'         :
            stage === 'fire_making'  ? 'FIRE MAKING'           :
            stage === 'fire_result'  ? 'THE FLAME DECIDES'     :
                                       'TORCH SNUFFED'}
@@ -732,9 +959,81 @@ export default function CouncilScreen({ navigation }: Props) {
           )}
           <TouchableOpacity style={styles.ctaBtn} onPress={handleTalkDone}>
             <Text style={styles.ctaBtnLabel}>
-              {isFireMakingCouncil ? 'PROCEED TO FIRE MAKING' : 'HEAD TO THE VOTE'}
+              {isFireMakingCouncil ? 'PROCEED TO FIRE MAKING' : 'CONTINUE'}
             </Text>
           </TouchableOpacity>
+        </ScrollView>
+      )}
+
+      {/* ── WHISPER ── */}
+      {stage === 'whisper' && (
+        <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
+          {shareWithId !== null ? (
+            <>
+              <Text style={styles.prompt}>
+                Tell <Text style={{ color: C.sun }}>{nameOf(shareWithId)}</Text> who you're voting for:
+              </Text>
+              {targets.filter(c => c.id !== shareWithId).map(c => (
+                <TouchableOpacity key={c.id} style={styles.targetCard} onPress={() => confirmSharePlan(c.id)}>
+                  <Portrait color={c.color} initials={initials(c.name)} size={36} />
+                  <View style={styles.targetInfo}>
+                    <Text style={styles.targetName}>{c.name}</Text>
+                    <Text style={styles.targetJob}>{c.job}</Text>
+                  </View>
+                </TouchableOpacity>
+              ))}
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShareWithId(null)}>
+                <Text style={styles.cancelBtnLabel}>CANCEL</Text>
+              </TouchableOpacity>
+            </>
+          ) : (
+            <>
+              <Text style={styles.jeffLine}>
+                "I see whispering. THIS is what tribal council is all about."
+              </Text>
+              <Text style={styles.prompt}>
+                {whispersLeft > 0
+                  ? `${whispersLeft} whisper${whispersLeft === 1 ? '' : 's'} left — share your plan or read the room.`
+                  : 'No whispers left. Time to vote.'}
+              </Text>
+              {councilMembers.map(c => {
+                const plan = sharedPlans[c.id];
+                const knowsPlan = plan?.day === day;
+                return (
+                  <View key={c.id} style={styles.targetCard}>
+                    <Portrait color={c.color} initials={initials(c.name)} size={36} />
+                    <View style={styles.targetInfo}>
+                      <Text style={styles.targetName}>{c.name}</Text>
+                      <Text style={[styles.targetJob, knowsPlan && { color: C.sun }]} numberOfLines={2}>
+                        {knowsPlan
+                          ? `Told them: "I'm voting ${nameOf(plan.targetId)}."`
+                          : askAnswers[c.id]
+                            ? `"${askAnswers[c.id]}"`
+                            : c.job}
+                      </Text>
+                    </View>
+                    {whispersLeft > 0 && (
+                      <View style={styles.whisperBtns}>
+                        {!knowsPlan && (
+                          <TouchableOpacity style={styles.whisperBtn} onPress={() => setShareWithId(c.id)}>
+                            <Text style={styles.whisperBtnLabel}>TELL</Text>
+                          </TouchableOpacity>
+                        )}
+                        {!askAnswers[c.id] && (
+                          <TouchableOpacity style={styles.whisperBtn} onPress={() => askPlan(c)}>
+                            <Text style={styles.whisperBtnLabel}>ASK</Text>
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    )}
+                  </View>
+                );
+              })}
+              <TouchableOpacity style={styles.ctaBtn} onPress={handleWhisperDone}>
+                <Text style={styles.ctaBtnLabel}>HEAD TO THE VOTE</Text>
+              </TouchableOpacity>
+            </>
+          )}
         </ScrollView>
       )}
 
@@ -872,6 +1171,17 @@ export default function CouncilScreen({ navigation }: Props) {
         </ScrollView>
       )}
 
+      {/* ── IDOL / ADVANTAGE MOMENT ── */}
+      {stage === 'idol_play' && (
+        <View style={[styles.body, styles.dramaCenter]}>
+          <Text style={styles.dramaGlyph}>🏺</Text>
+          {dramaLines.slice(0, dramaIdx).map((line, i) => (
+            <Text key={i} style={styles.dramaLine}>{line}</Text>
+          ))}
+          {dramaIdx < dramaLines.length && <Text style={styles.ellipsis}>· · ·</Text>}
+        </View>
+      )}
+
       {/* ── PARCHMENT REVEAL ── */}
       {stage === 'parchment' && (
         <View style={styles.body}>
@@ -888,17 +1198,12 @@ export default function CouncilScreen({ navigation }: Props) {
           )}
           <View style={styles.parchmentCenter}>
             {currentParchment ? (
-              <Animated.View style={[styles.parchmentBig, {
-                opacity: cardAnim,
-                transform: [{ scale: cardAnim.interpolate({ inputRange: [0, 1], outputRange: [0.85, 1] }) }],
-              }]}>
-                <Text style={styles.parchmentVoidLabel}>
-                  {currentParchment.voided ? '✕ DOES NOT COUNT' : ''}
-                </Text>
-                <Text style={[styles.parchmentName, currentParchment.voided && styles.parchmentNameVoided]}>
-                  {currentParchment.name}
-                </Text>
-              </Animated.View>
+              <VoteParchment
+                key={revealIndex}
+                name={currentParchment.name}
+                voided={currentParchment.voided}
+                decisive={revealIndex === parchmentList.length}
+              />
             ) : (
               <View style={styles.parchmentPlaceholder}>
                 <Text style={styles.parchmentPlaceholderText}>...</Text>
@@ -922,6 +1227,44 @@ export default function CouncilScreen({ navigation }: Props) {
             </View>
           )}
         </View>
+      )}
+
+      {/* ── REVOTE ── */}
+      {stage === 'revote' && tribalResult?.tieIds && (
+        <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
+          <Text style={styles.jeffLine}>
+            "We have a tie between {tribalResult.tieIds.map(id => nameOf(id)).join(' and ')}.
+            We're going to vote again — you can only vote for one of them.
+            Tied castaways don't vote."
+          </Text>
+          {tribalResult.tieIds.includes(PLAYER_ID) ? (
+            <>
+              <Text style={styles.prompt}>
+                You're in the tie. Your torch is in their hands now.
+              </Text>
+              <TouchableOpacity style={styles.ctaBtn} onPress={() => runRevote(null)}>
+                <Text style={styles.ctaBtnLabel}>FACE THE REVOTE</Text>
+              </TouchableOpacity>
+            </>
+          ) : (
+            <>
+              <Text style={styles.prompt}>Cast your revote:</Text>
+              {tribalResult.tieIds.filter(id => id !== PLAYER_ID).map(id => {
+                const c = castaways.find(x => x.id === id);
+                if (!c) return null;
+                return (
+                  <TouchableOpacity key={id} style={styles.targetCard} onPress={() => runRevote(id)}>
+                    <Portrait color={c.color} initials={initials(c.name)} size={40} />
+                    <View style={styles.targetInfo}>
+                      <Text style={styles.targetName}>{c.name}</Text>
+                      <Text style={styles.targetJob}>{c.job}</Text>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </>
+          )}
+        </ScrollView>
       )}
 
       {/* ── FIRE MAKING ── */}
@@ -1004,11 +1347,24 @@ export default function CouncilScreen({ navigation }: Props) {
         <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
           <View style={styles.snuffBlock}>
             <Text style={styles.snuffFlame}>🔥</Text>
+            {rocksDrawn && (
+              <Text style={styles.rocksNote}>Deadlocked twice — it came down to rocks.</Text>
+            )}
             <Text style={styles.snuffText}>
               {tribalResult.eliminatedId === PLAYER_ID
                 ? 'The tribe has spoken. You have been voted out.'
                 : `${bootName()}, the tribe has spoken.`}
             </Text>
+            {tribalResult.eliminatedId !== PLAYER_ID && (() => {
+              const boot = castaways.find(c => c.id === tribalResult.eliminatedId);
+              if (!boot) return null;
+              const goesToTwist = boot.onRedemptionIsland || edgeIds.includes(boot.id);
+              return (
+                <Text style={styles.finalWords}>
+                  "{getFinalWords(boot.archetype, boot.id, day, goesToTwist)}"
+                </Text>
+              );
+            })()}
           </View>
           {Object.entries(tribalResult.resolvedVotes)
             .sort(([, a], [, b]) => b.length - a.length)
@@ -1076,6 +1432,13 @@ const styles = StyleSheet.create({
 
   ctaBtn:                { backgroundColor: C.torch, borderRadius: 12, paddingVertical: 16, alignItems: 'center', marginTop: 16 },
   ctaBtnLabel:           { fontSize: 13, fontFamily: F.body, fontWeight: '800', color: C.bone, letterSpacing: 1 },
+  dramaCenter:           { alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32, gap: 14 },
+  dramaGlyph:            { fontSize: 44, marginBottom: 6 },
+  dramaLine:             { fontSize: 17, fontFamily: F.display, fontWeight: '700', color: C.sun, textAlign: 'center', lineHeight: 24 },
+
+  whisperBtns:           { gap: 6 },
+  whisperBtn:            { borderWidth: 1, borderColor: '#ffffff33', borderRadius: 8, paddingVertical: 5, paddingHorizontal: 12 },
+  whisperBtnLabel:       { fontSize: 10, fontFamily: F.mono, fontWeight: '700', color: C.sun, letterSpacing: 1 },
   cancelBtn:             { borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginTop: 8, borderWidth: 1, borderColor: '#ffffff22' },
   cancelBtnLabel:        { fontSize: 12, fontFamily: F.body, fontWeight: '700', color: C.inkSoft, letterSpacing: 1 },
 
@@ -1101,6 +1464,8 @@ const styles = StyleSheet.create({
   snuffBlock:            { alignItems: 'center', paddingVertical: 24 },
   snuffFlame:            { fontSize: 36, marginBottom: 12 },
   snuffText:             { fontSize: 15, fontFamily: F.body, color: C.torch, fontWeight: '600', textAlign: 'center', lineHeight: 22 },
+  finalWords:            { fontSize: 13, fontFamily: F.body, fontStyle: 'italic', color: C.inkSoft, textAlign: 'center', lineHeight: 19, marginTop: 10, paddingHorizontal: 12 },
+  rocksNote:             { fontSize: 11, fontFamily: F.mono, color: C.sun, letterSpacing: 1, marginBottom: 8, textAlign: 'center' },
   tallyRow:              { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 10 },
   tallyRowBooted:        { opacity: 0.85 },
   tallyName:             { flex: 1, fontSize: 14, fontFamily: F.body, color: C.bone, fontWeight: '600' },

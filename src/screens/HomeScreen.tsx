@@ -117,7 +117,7 @@ export default function HomeScreen({ navigation }: Props) {
   const {
     playerName, playerTribeId, tribes, feed, castaways,
     playerIdolCount, playerAdvantages, playerImmunityWins, edgeIds,
-    gameSettings,
+    gameSettings, playerThreat,
   } = useGameStore(
     useShallow(s => ({
       playerName:          s.playerName,
@@ -130,6 +130,7 @@ export default function HomeScreen({ navigation }: Props) {
       playerImmunityWins:  s.playerImmunityWins,
       edgeIds:             s.edgeIds,
       gameSettings:        s.gameSettings,
+      playerThreat:        s.playerThreat,
     }))
   );
 
@@ -207,6 +208,25 @@ export default function HomeScreen({ navigation }: Props) {
             <StatColumn label="ADV"     value={playerAdvantages.length} theme={theme} />
             <View style={[styles.statDiv, { backgroundColor: theme.cardBorder }]} />
             <StatColumn label="WINS"    value={playerImmunityWins}      theme={theme} />
+          </View>
+          {/* Threat meter — how big a target the tribe thinks you are */}
+          <View style={[styles.threatBlock, { borderTopColor: theme.cardBorder }]}>
+            <View style={styles.threatHeader}>
+              <Text style={[styles.statsCrumb, { color: theme.textSoft }]}>THREAT LEVEL</Text>
+              <Text style={[styles.threatLabel, {
+                color: playerThreat < 0.35 ? C.palm : playerThreat < 0.6 ? C.sun : C.coral,
+              }]}>
+                {playerThreat < 0.35 ? 'UNDER THE RADAR'
+                  : playerThreat < 0.6 ? 'ON THEIR MINDS'
+                  : 'TARGET ON YOUR BACK'}
+              </Text>
+            </View>
+            <View style={styles.threatBar}>
+              <View style={[styles.threatFill, {
+                width: `${Math.round(playerThreat * 100)}%` as any,
+                backgroundColor: playerThreat < 0.35 ? C.palm : playerThreat < 0.6 ? C.sun : C.coral,
+              }]} />
+            </View>
           </View>
         </View>
 
@@ -372,6 +392,11 @@ const styles = StyleSheet.create({
   seasonFill:      { height: 4, backgroundColor: C.palm, borderRadius: 2 },
   seasonPct:       { fontFamily: F.mono, fontSize: 10 },
   statsBottom:     { flexDirection: 'row', borderTopWidth: 1 },
+  threatBlock:     { borderTopWidth: 1, paddingHorizontal: 16, paddingVertical: 10 },
+  threatHeader:    { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
+  threatLabel:     { fontSize: 10, fontFamily: F.mono, fontWeight: '700', letterSpacing: 1 },
+  threatBar:       { height: 4, backgroundColor: 'rgba(0,0,0,0.1)', borderRadius: 2, overflow: 'hidden' },
+  threatFill:      { height: 4, borderRadius: 2 },
   statCol:         { flex: 1, paddingVertical: 10, alignItems: 'center' },
   statColNum:      { fontFamily: F.display, fontWeight: '800', fontSize: 22, lineHeight: 26 },
   statColLabel:    { fontFamily: F.mono, fontSize: 9, letterSpacing: 1, marginTop: 2 },

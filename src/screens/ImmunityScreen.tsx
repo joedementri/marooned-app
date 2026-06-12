@@ -13,6 +13,7 @@ import { challengeSkill } from '../engine/challengeEngine';
 import { pickChallenge } from '../data/challenges';
 import type { ChallengeParticipant, MinigameResult } from '../minigames/types';
 import ChallengeHost from '../minigames/ChallengeHost';
+import ConfettiBurst from '../components/game/ConfettiBurst';
 import { C } from '../tokens/colors';
 import { F } from '../tokens/fonts';
 import { useTheme } from '../contexts/ThemeContext';
@@ -136,6 +137,7 @@ export default function ImmunityScreen({ navigation }: Props) {
 
   return (
     <ScrollView contentContainerStyle={[styles.root, { backgroundColor: theme.screenBg }]} bounces={false}>
+      {playerImmune && <ConfettiBurst />}
       <Text style={styles.eyebrow}>{isTribeMode ? 'TRIBAL IMMUNITY' : 'INDIVIDUAL IMMUNITY'}</Text>
       <Text style={styles.type}>{def.displayName}</Text>
 
