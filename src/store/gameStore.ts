@@ -268,6 +268,8 @@ export const useGameStore = create<GameStore>()(
           type: 'merge',
         });
         get().reshuffleIdolLocations();
+        // Making the merge puts the player more squarely on everyone's radar.
+        get().bumpPlayerThreat(0.08);
 
         // Redemption Island re-entry: last RI castaway comes back
         if (gameSettings.twist === 'redemption' && riQueue.length > 0) {
@@ -352,6 +354,7 @@ export const useGameStore = create<GameStore>()(
           riQueue: [],
           relationships: {},
           alliances: [],
+          sharedPlans: {},
           intel: [],
           edgeIds: [],
           edgeState: {},

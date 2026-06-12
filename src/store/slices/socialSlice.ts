@@ -28,9 +28,20 @@ export interface Alliance {
   knownToPlayer: boolean;   // membership or earned intel
 }
 
+// The player whispering a vote plan to an NPC (truthfully or not). The NPC
+// only "follows the player's lead" at tribal if a plan was actually shared —
+// and they follow what they were TOLD, not the player's secret ballot.
+export interface SharedPlan {
+  day: number;
+  targetId: number; // who the player claimed they're voting for
+}
+
 export interface SocialSlice {
   relationships: Record<string, Relationship>; // directed, key `${a}>${b}`
   alliances: Alliance[];
+  sharedPlans: Record<number, SharedPlan>; // npcId → plan the player told them
+  setSharedPlan(npcId: number, targetId: number, day: number): void;
+  clearSharedPlans(): void;
   initSocial(castaways: Castaway[], gameSeed: number): void;
   applyRelDeltas(deltas: RelDelta[]): void;
   applyAllianceOps(ops: AllianceOp[]): void;
@@ -46,9 +57,18 @@ function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min
 export const createSocialSlice: StateCreator<GameStore, [], [], SocialSlice> = (set, get) => ({
   relationships: {},
   alliances: [],
+  sharedPlans: {},
+
+  setSharedPlan(npcId, targetId, day) {
+    set(state => ({ sharedPlans: { ...state.sharedPlans, [npcId]: { day, targetId } } }));
+  },
+
+  clearSharedPlans() {
+    set({ sharedPlans: {} });
+  },
 
   initSocial(castaways, gameSeed) {
-    set({ relationships: initRelationships(castaways, gameSeed), alliances: [] });
+    set({ relationships: initRelationships(castaways, gameSeed), alliances: [], sharedPlans: {} });
   },
 
   applyRelDeltas(deltas) {
@@ -137,7 +157,15 @@ export const createSocialSlice: StateCreator<GameStore, [], [], SocialSlice> = (
       const rels = state.relationships;
       return {
         castaways: state.castaways.map(c => {
-          if (c.id === PLAYER_ID) return c;
+          // The player's threat stat mirrors playerThreat, which grows with
+          // visible moves (immunity wins, advantage plays, surviving to merge).
+          // perceivedThreat() in the vote/social engines reads stats.threat,
+          // so the whole AI reacts as the player becomes a bigger target.
+          if (c.id === PLAYER_ID) {
+            return c.stats.threat === state.playerThreat
+              ? c
+              : { ...c, stats: { ...c.stats, threat: state.playerThreat } };
+          }
           const r = rels[relKey(c.id, PLAYER_ID)];
           if (!r) return c;
           // affinity -1..1 → loyalty 0..1; trust direct; grudge → suspicion.

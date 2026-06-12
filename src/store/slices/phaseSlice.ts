@@ -123,5 +123,6 @@ export const createPhaseSlice: StateCreator<GameStore, [], [], PhaseSlice> = (se
       immuneTribeId: null,
     }));
     get().resetDailySearches();
+    get().clearSharedPlans();
   },
 });

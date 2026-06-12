@@ -226,6 +226,39 @@ export function simulateMorningTick(input: SimInput): SimTickResult {
     }
   }
 
+  // 4. Alliance loyalty check: an NPC whose trust in their group has eroded
+  // may walk — and possibly defect to a rival alliance that likes them more.
+  // At most one flip per tick so the social map shifts gradually.
+  const presentIds = new Set(castaways.map(c => c.id));
+  outer:
+  for (const alliance of shuffled(alliances, rng)) {
+    for (const memberId of alliance.memberIds) {
+      if (memberId === PLAYER_ID || !presentIds.has(memberId)) continue;
+      const others = alliance.memberIds.filter(m => m !== memberId && presentIds.has(m));
+      if (others.length === 0) continue;
+      const cohesion = others.reduce((s, o) => s + getRel(relationships, memberId, o).trust, 0) / others.length;
+      if (cohesion >= 0.35 || rng() >= 0.5) continue;
+
+      res.allianceOps.push({ kind: 'removeMember', id: alliance.id, memberId });
+
+      const rival = alliances.find(a => {
+        if (a.id === alliance.id || a.memberIds.includes(memberId)) return false;
+        const core = a.memberIds.filter(m => m !== PLAYER_ID && presentIds.has(m));
+        if (core.length < 2) return false;
+        const avgTrust = core.reduce((s, m) => s + getRel(relationships, m, memberId).trust, 0) / core.length;
+        return avgTrust > 0.5;
+      });
+      if (rival) res.allianceOps.push({ kind: 'addMember', id: rival.id, memberId });
+
+      if (playerInCamp && rng() < OBSERVE_CHANCE) {
+        res.observations.push(obs(day, 'observation', [memberId],
+          { type: 'relationship', a: memberId, b: alliance.memberIds.find(m => m !== memberId) ?? memberId, tone: 'feuding' },
+          `${names.get(memberId)} has been drifting away from their usual group.`, 'medium'));
+      }
+      break outer;
+    }
+  }
+
   return res;
 }
 

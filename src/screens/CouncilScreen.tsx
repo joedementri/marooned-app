@@ -25,6 +25,8 @@ import FireGame from '../minigames/FireGame';
 import TribalCouncilScene from '../components/graphics/TribalCouncilScene';
 import { challengeSkill } from '../engine/challengeEngine';
 import { buildJuryRelScores } from '../utils/juryRelScores';
+import type { RelDelta } from '../engine/socialEngine';
+import type { IntelEntry } from '../store/slices/intelSlice';
 import { hashSeed } from '../engine/rng';
 import { C } from '../tokens/colors';
 import { F } from '../tokens/fonts';
@@ -152,10 +154,11 @@ export default function CouncilScreen({ navigation }: Props) {
     castaways, day, phase, gameMode,
     playerName, playerTribeId, playerAdvantages, playerIdolCount,
     immunityWinnerId, difficulty, gameSettings,
-    relationships, alliances, gameSeed, edgeIds,
+    relationships, alliances, gameSeed, edgeIds, sharedPlans,
+    applyRelDeltas, addIntel, syncPlayerFacingStats,
     addFeedEntry, eliminateCastaway, permanentEliminate, addJuryMember,
     removePlayerAdvantage, removeCastawayAdvantage, setPlayerIdolCount, setGameMode,
-    applyTribalAftermathToStore,
+    applyTribalAftermathToStore, bumpPlayerThreat,
   } = useGameStore(
     useShallow(s => ({
       castaways:            s.castaways,
@@ -173,6 +176,10 @@ export default function CouncilScreen({ navigation }: Props) {
       alliances:            s.alliances,
       gameSeed:             s.gameSeed,
       edgeIds:              s.edgeIds,
+      sharedPlans:          s.sharedPlans,
+      applyRelDeltas:       s.applyRelDeltas,
+      addIntel:             s.addIntel,
+      syncPlayerFacingStats: s.syncPlayerFacingStats,
       addFeedEntry:         s.addFeedEntry,
       eliminateCastaway:    s.eliminateCastaway,
       permanentEliminate:   s.permanentEliminate,
@@ -182,6 +189,7 @@ export default function CouncilScreen({ navigation }: Props) {
       setPlayerIdolCount:   s.setPlayerIdolCount,
       setGameMode:          s.setGameMode,
       applyTribalAftermathToStore: s.applyTribalAftermathToStore,
+      bumpPlayerThreat:     s.bumpPlayerThreat,
     }))
   );
 
@@ -316,6 +324,7 @@ export default function CouncilScreen({ navigation }: Props) {
       day,
       gameSeed,
       scopeTag:        gameMode === 'pre-merge' ? playerTribeId : 'merge',
+      sharedPlans,
     });
   }
 
@@ -379,6 +388,11 @@ export default function CouncilScreen({ navigation }: Props) {
       .filter(p => p !== 'hii' && p !== 'safety_without_power')
       .forEach(p => removePlayerAdvantage(p));
 
+    // Every advantage the player plays in front of the council marks them as
+    // a strategic threat in the eyes of the remaining castaways.
+    const playerPublicPlays = plays.filter(p => p.actorId === PLAYER_ID).length;
+    if (playerPublicPlays > 0) bumpPlayerThreat(0.1 * playerPublicPlays);
+
     const list = buildDramaticOrder(
       rawVotes,
       result.eliminatedId,
@@ -408,6 +422,40 @@ export default function CouncilScreen({ navigation }: Props) {
     // Update the relationship graph: allies of the booted resent the voters,
     // blindsided alliances fracture.
     applyTribalAftermathToStore(rawVotes, result.eliminatedId);
+
+    // Whispered plans come due. Votes are read aloud, so anyone the player
+    // told a plan can tell whether the player kept their word.
+    const planEntries = Object.entries(sharedPlans).filter(([, p]) => p.day === day);
+    if (planEntries.length > 0) {
+      const relDeltas: RelDelta[] = [];
+      const lieIntel: IntelEntry[] = [];
+      for (const [npcIdStr, plan] of planEntries) {
+        const npcId = Number(npcIdStr);
+        const npc = castaways.find(c => c.id === npcId);
+        if (!npc || npc.eliminated || npcId === result.eliminatedId) continue;
+        if (playerVoteTarget === plan.targetId) {
+          relDeltas.push({ a: npcId, b: PLAYER_ID, d: { trust: 0.05, lastEventDay: day } });
+        } else {
+          relDeltas.push({
+            a: npcId, b: PLAYER_ID,
+            d: { trust: -0.25, grudge: 0.2, affinity: -0.1, lastEventDay: day },
+          });
+          lieIntel.push({
+            id: `lie-d${day}-${npcId}`,
+            day,
+            kind: 'observation',
+            sourceId: null,
+            subjectIds: [npcId],
+            claim: { type: 'relationship', a: npcId, b: PLAYER_ID, tone: 'feuding' },
+            text: `${npc.name.split(' ')[0]} compared notes after tribal. They know you didn't vote the way you said.`,
+            truthful: true,
+            confidence: 'high',
+          });
+        }
+      }
+      if (relDeltas.length) { applyRelDeltas(relDeltas); syncPlayerFacingStats(); }
+      if (lieIntel.length) addIntel(lieIntel);
+    }
 
     if (gameMode === 'post-merge') {
       const boot = castaways.find(c => c.id === result.eliminatedId);

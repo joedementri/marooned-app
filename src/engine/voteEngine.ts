@@ -20,6 +20,10 @@ export interface VoteEngineInput {
   day: number;
   gameSeed: number;
   scopeTag?: string;            // namespaces the rng (e.g. tribe id)
+  // npcId → target the player TOLD them they're voting for (via whisper).
+  // NPCs only follow the player's lead when a plan was actually shared —
+  // and they follow what they were told, which may be a lie.
+  sharedPlans?: Record<number, { day: number; targetId: number }>;
 }
 
 export interface VoteContext {
@@ -57,7 +61,7 @@ function blocConsensus(
 }
 
 export function simulateTribalVotes(input: VoteEngineInput): VoteContext {
-  const { voters, eligibleTargets, playerVote, relationships, alliances, castaways, day, gameSeed, scopeTag } = input;
+  const { voters, eligibleTargets, playerVote, relationships, alliances, castaways, day, gameSeed, scopeTag, sharedPlans } = input;
   const rng = gameRng(gameSeed, `vote-d${day}-${scopeTag ?? 'main'}`);
   const castMap = new Map(castaways.map(c => [c.id, c]));
 
@@ -99,7 +103,11 @@ export function simulateTribalVotes(input: VoteEngineInput): VoteContext {
       s += (-r.affinity) * 1.2;
       s += r.grudge * 1.6;
       if (bloc && bloc.targetId === id) s += 0.8 + bloc.strength * 1.2;
-      if (playerVote === id) {
+      // Follow the player's lead ONLY if the player whispered a plan to this
+      // voter (no mind-reading the secret ballot), and only toward the target
+      // the player named — which may not be who the player actually votes for.
+      const plan = sharedPlans?.[voter.id];
+      if (plan && plan.day === day && plan.targetId === id) {
         const trustPlayer = getRel(relationships, voter.id, PLAYER_ID).trust;
         if (voter.archetype === 'loyalist' || trustPlayer > 0.6) s += 0.6;
       }
@@ -116,17 +124,54 @@ export function simulateTribalVotes(input: VoteEngineInput): VoteContext {
   }
 
   // 3. NPC advantage plays.
+  //
+  // NPCs do NOT get to read the real ballot box. Each one acts on what they
+  // could plausibly know: their own vote, votes coordinated inside their own
+  // alliances, and whispers they "heard" around camp — more if they're
+  // paranoid or close to the voter. Paranoid players overestimate the votes
+  // against them, which produces realistic wasted idols.
   const npcPlays: AdvantagePlay[] = [];
   const consumed: Array<{ holderId: number; type: AdvantageType }> = [];
-  const counts: Record<number, number> = {};
-  for (const [t, vs] of Object.entries(votes)) counts[Number(t)] = vs.length;
-  const totalVotes = Object.values(counts).reduce((a, b) => a + b, 0);
+
+  const ballots: Array<{ voterId: number; targetId: number }> = [];
+  for (const [t, vs] of Object.entries(votes)) {
+    for (const v of vs) ballots.push({ voterId: v, targetId: Number(t) });
+  }
+  const totalVotes = ballots.length;
+  // Headcount is public knowledge, so the majority threshold is too.
   const needToBoot = Math.floor(totalVotes / 2) + 1;
+
+  const allianceMates = new Map<number, Set<number>>();
+  for (const alliance of alliances) {
+    for (const m of alliance.memberIds) {
+      let set = allianceMates.get(m);
+      if (!set) { set = new Set(); allianceMates.set(m, set); }
+      for (const o of alliance.memberIds) if (o !== m) set.add(o);
+    }
+  }
+
+  function perceivedCountsFor(npc: Castaway): Record<number, number> {
+    const counts: Record<number, number> = {};
+    const mates = allianceMates.get(npc.id);
+    for (const b of ballots) {
+      let heard: boolean;
+      if (b.voterId === npc.id || (mates?.has(b.voterId) ?? false)) {
+        heard = true; // own vote / coordinated within the alliance
+      } else {
+        const closeness = (getRel(relationships, npc.id, b.voterId).affinity + 1) / 2;
+        heard = rng() < 0.3 + 0.35 * npc.personality.paranoia + 0.35 * closeness;
+      }
+      if (heard) counts[b.targetId] = (counts[b.targetId] ?? 0) + 1;
+    }
+    return counts;
+  }
 
   const idolUsedThisCouncil = new Set<number>(); // protected ids (avoid double idol on same person)
 
   for (const npc of voters) {
-    const votesAgainst = counts[npc.id] ?? 0;
+    const perceived = perceivedCountsFor(npc);
+    const overestimate = npc.personality.paranoia > 0.7 ? 1 : 0;
+    const votesAgainst = (perceived[npc.id] ?? 0) + overestimate;
     const inDanger = votesAgainst >= 2 && votesAgainst >= needToBoot - 1;
 
     // a) Save yourself.
@@ -141,11 +186,11 @@ export function simulateTribalVotes(input: VoteEngineInput): VoteContext {
       }
     }
 
-    // b) Blindside save: play your idol on a close ally who is about to go.
+    // b) Blindside save: play your idol on a close ally who seems about to go.
     if (npc.advantages.includes('hii') && npc.personality.boldness > 0.55) {
       const ally = voters
         .filter(o => o.id !== npc.id && getRel(relationships, npc.id, o.id).affinity > 0.6)
-        .map(o => ({ o, against: counts[o.id] ?? 0 }))
+        .map(o => ({ o, against: perceived[o.id] ?? 0 }))
         .filter(x => x.against >= needToBoot - 1 && !idolUsedThisCouncil.has(x.o.id))
         .sort((a, b) => b.against - a.against)[0];
       if (ally && rng() < npc.personality.boldness) {
@@ -156,10 +201,10 @@ export function simulateTribalVotes(input: VoteEngineInput): VoteContext {
       }
     }
 
-    // c) Extra vote in a tight race, piled onto whoever they targeted.
+    // c) Extra vote in a race they believe is tight, piled onto their target.
     if (npc.advantages.includes('extra_vote') && totalVotes > 0) {
       const myTarget = Object.entries(votes).find(([, vs]) => vs.includes(npc.id))?.[0];
-      if (myTarget != null && (counts[Number(myTarget)] ?? 0) >= needToBoot - 1 && rng() < 0.5 + npc.personality.boldness * 0.3) {
+      if (myTarget != null && (perceived[Number(myTarget)] ?? 0) >= needToBoot - 1 && rng() < 0.5 + npc.personality.boldness * 0.3) {
         npcPlays.push({ actorId: npc.id, type: 'extra_vote' });
         consumed.push({ holderId: npc.id, type: 'extra_vote' });
         narration.push(`${npc.name.split(' ')[0]} produces an Extra Vote.`);
