@@ -14,7 +14,8 @@
       "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\Joe\\\\Desktop\\\\Proj\\\\marooned-app\\\\android\" -Recurse -File | ForEach-Object { $size = [math]::Round\\($_.Length/1MB, 2\\); New-Object PSObject -Property @{File = $_.FullName.Replace\\(\"c:\\\\Users\\\\Joe\\\\Desktop\\\\Proj\\\\marooned-app\\\\\", \"\"\\); SizeMB = $size} } | Where-Object {$_.SizeMB -gt 1} | Sort-Object SizeMB -Descending | Format-Table -AutoSize)",
       "PowerShell($build = \\(Get-ChildItem -Path \"c:\\\\Users\\\\Joe\\\\Desktop\\\\Proj\\\\marooned-app\\\\android\\\\app\\\\build\" -Recurse -File 2>$null | Measure-Object -Property Length -Sum\\).Sum; $gradle = \\(Get-ChildItem -Path \"c:\\\\Users\\\\Joe\\\\Desktop\\\\Proj\\\\marooned-app\\\\android\\\\.gradle\" -Recurse -File 2>$null | Measure-Object -Property Length -Sum\\).Sum; Write-Host \"android/app/build/: $\\([math]::Round\\($build/1MB, 2\\)\\) MB\"; Write-Host \"android/.gradle/: $\\([math]::Round\\($gradle/1MB, 2\\)\\) MB\")",
       "PowerShell(Get-ChildItem -Path \"c:\\\\Users\\\\Joe\\\\Desktop\\\\Proj\\\\marooned-app\\\\android\\\\app\\\\build\\\\outputs\" -Recurse -File 2>$null | ForEach-Object { $size = [math]::Round\\($_.Length/1MB, 2\\); New-Object PSObject -Property @{File = $_.Name; SizeMB = $size} } | Sort-Object SizeMB -Descending | Format-Table -AutoSize)",
-      "PowerShell(npx tsc --noEmit)"
+      "PowerShell(npx tsc --noEmit)",
+      "PowerShell(npx -y tsx scripts/headlessSeason.ts)"
     ]
   }
 }
