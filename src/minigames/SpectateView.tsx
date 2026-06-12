@@ -9,19 +9,21 @@ interface Props {
   participants: ChallengeParticipant[];
   seed: number;
   label?: string;
+  /** Per-participant finish times (id → ms), forwarded to the rail. */
+  durations?: Record<number, number>;
   onDone: () => void;
 }
 
 // Generic watch-only view for AI-vs-AI challenges (e.g. an off-screen duel the
 // player isn't competing in). The real result is computed by challengeEngine; this
 // just shows the field racing and fires onDone when it settles.
-export default function SpectateView({ participants, seed, label = 'CHALLENGE', onDone }: Props) {
+export default function SpectateView({ participants, seed, label = 'CHALLENGE', durations, onDone }: Props) {
   const [running] = useState(true);
   return (
     <View style={styles.root}>
       <Text style={styles.eyebrow}>{label}</Text>
       <Text style={styles.sub}>Watching the challenge play out…</Text>
-      <ChallengeRail participants={participants} running={running} seed={seed} onAllSettled={onDone} />
+      <ChallengeRail participants={participants} running={running} seed={seed} durations={durations} onAllSettled={onDone} />
     </View>
   );
 }

@@ -47,7 +47,10 @@ export default function FireRig({ state, width, height, label, color, flicker = 
     <View style={[styles.rig, { width }]}>
       <View style={styles.header}>
         <Text style={[styles.name, { color }]} numberOfLines={1}>{label}</Text>
-        <Text style={styles.stage}>{stageLabel(state.stage)}</Text>
+        <Text style={styles.stage}>
+          {stageLabel(state.stage)}
+          {state.flameOuts > 0 ? `  ·  RESTART ×${state.flameOuts}` : ''}
+        </Text>
       </View>
 
       <Svg width={width} height={height}>
@@ -84,6 +87,27 @@ export default function FireRig({ state, width, height, label, color, flicker = 
             <Rect x={cx - 11} y={baseY - 16} width={22} height={4} rx={2} fill="#cfcfcf" opacity={0.6} />
           </G>
         )}
+
+        {/* machete resting by the block while striking */}
+        {state.stage === 'strike' && (
+          <G transform={`rotate(14,${cx + 22},${baseY - 8})`}>
+            <Path d={`M ${cx + 6} ${baseY - 10} L ${cx + 40} ${baseY - 13} Q ${cx + 48} ${baseY - 12} ${cx + 49} ${baseY - 8} Q ${cx + 43} ${baseY - 4} ${cx + 36} ${baseY - 5} L ${cx + 6} ${baseY - 6} Z`} fill="#cfd6da" stroke="#7a8288" strokeWidth={1} />
+            <Rect x={cx - 5} y={baseY - 11} width={12} height={6} rx={2} fill="#5c3a1e" />
+          </G>
+        )}
+
+        {/* silver shavings piling onto the twine */}
+        {(state.stage === 'shave' || state.stage === 'strike') &&
+          Array.from({ length: Math.round(state.shavings / 8) }).map((_, i) => (
+            <Circle
+              key={i}
+              cx={cx - 18 + ((i * 53) % 37)}
+              cy={baseY - 2 - ((i * 29) % 9)}
+              r={1.3}
+              fill="#d9d9d9"
+              opacity={0.9}
+            />
+          ))}
 
         {/* ember glow */}
         {state.stage === 'ember' && (

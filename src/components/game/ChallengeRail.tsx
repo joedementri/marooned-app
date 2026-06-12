@@ -14,6 +14,9 @@ interface Props {
   durationMs?: number;
   seed: number;
   maxVisible?: number;
+  /** Per-participant finish times (id → ms). Overrides the generic skill pace so
+   *  the bars mirror a game's own AI simulation. */
+  durations?: Record<number, number>;
   /** Fired once the slowest opponent's bar reaches the finish line. */
   onAllSettled?: () => void;
 }
@@ -22,8 +25,19 @@ interface Props {
 // Purely cosmetic — the authoritative result comes from challengeEngine — but it
 // lets the player watch the field pull ahead or fall behind in real time. Capped
 // so a large field doesn't overflow the screen.
-export default function ChallengeRail({ participants, running, durationMs = 7000, seed, maxVisible = 6, onAllSettled }: Props) {
+export default function ChallengeRail({ participants, running, durationMs = 7000, seed, maxVisible = 6, durations, onAllSettled }: Props) {
   const shown = participants.slice(0, maxVisible);
+
+  // When explicit durations are given, the slowest participant (not the
+  // last-listed one) gates settling.
+  useEffect(() => {
+    if (!running || !durations || !onAllSettled) return;
+    const times = shown.map(p => durations[p.id]).filter((t): t is number => t != null);
+    if (times.length === 0) return;
+    const t = setTimeout(onAllSettled, Math.max(...times) + 400);
+    return () => clearTimeout(t);
+  }, [running]); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <View style={styles.rail}>
       {shown.map((p, i) => (
@@ -32,9 +46,10 @@ export default function ChallengeRail({ participants, running, durationMs = 7000
           participant={p}
           running={running}
           durationMs={durationMs}
+          fixedMs={durations?.[p.id]}
           seed={seed + i}
           isLast={i === shown.length - 1}
-          onSettled={i === shown.length - 1 ? onAllSettled : undefined}
+          onSettled={!durations && i === shown.length - 1 ? onAllSettled : undefined}
         />
       ))}
     </View>
@@ -42,11 +57,12 @@ export default function ChallengeRail({ participants, running, durationMs = 7000
 }
 
 function RailRow({
-  participant, running, durationMs, seed, onSettled,
+  participant, running, durationMs, fixedMs, seed, onSettled,
 }: {
   participant: ChallengeParticipant;
   running: boolean;
   durationMs: number;
+  fixedMs?: number;
   seed: number;
   isLast: boolean;
   onSettled?: () => void;
@@ -57,8 +73,8 @@ function RailRow({
     if (!running) return;
     const rng = mulberry32(seed >>> 0);
     const jitter = 0.85 + rng() * 0.3;
-    // Stronger opponents finish sooner.
-    const dur = Math.max(1500, durationMs * (1.5 - participant.skill) * jitter);
+    // Stronger opponents finish sooner — unless the game supplied an exact time.
+    const dur = fixedMs ?? Math.max(1500, durationMs * (1.5 - participant.skill) * jitter);
     fill.value = withTiming(100, { duration: dur, easing: Easing.inOut(Easing.quad) });
     if (onSettled) {
       const t = setTimeout(onSettled, dur + 120);

@@ -1,7 +1,12 @@
 // Pure fire-making stage machine, shared by the player (driven by gestures) and
 // the AI (driven by useFireAi). The full process: build a twine nest → shave
-// magnesium → strike flint → coax an ember → small sticks → large sticks → the
-// flame burns the rope → flag flips.
+// magnesium into the nest → strike the machete for a spark → coax an ember →
+// small sticks → large sticks → the flame burns the rope → flag flips.
+//
+// The stakes: losing the ember or the flame is a FULL restart back to shaving
+// (the nest survives; so does any rope damage already done).
+
+import type { Difficulty } from '../types';
 
 export type FireStage =
   | 'nest' | 'shave' | 'strike' | 'ember' | 'smallSticks' | 'largeSticks' | 'ropeBurn' | 'done';
@@ -14,21 +19,41 @@ export interface FireState {
   flameHeight: number;  // 0..100
   ropeBurn: number;     // 0..100
   strikes: number;
+  flameOuts: number;    // times the fire died and play restarted from shaving
 }
+
+// Per-difficulty pacing/punishment. Both player and AI run the same numbers —
+// difficulty changes the fire, not who's holding the machete.
+export interface FireTuning {
+  strikeThreshold: number;     // strike quality needed to catch a spark
+  shaveRate: number;           // shavings per second of holding
+  shaveDecayInStrike: number;  // shavings lost per second while striking (dawdle penalty)
+  emberDecay: number;          // ember health lost per second
+  smallDecay: number;          // flame lost per second in smallSticks
+  largeDecay: number;          // flame lost per second in largeSticks
+  ropeDecay: number;           // flame lost per second while burning the rope
+}
+
+export const FIRE_TUNING: Record<Difficulty, FireTuning> = {
+  easy:   { strikeThreshold: 0.45, shaveRate: 30, shaveDecayInStrike: 3, emberDecay: 22, smallDecay: 7,  largeDecay: 10, ropeDecay: 8 },
+  medium: { strikeThreshold: 0.55, shaveRate: 26, shaveDecayInStrike: 4, emberDecay: 26, smallDecay: 9,  largeDecay: 12, ropeDecay: 9 },
+  hard:   { strikeThreshold: 0.65, shaveRate: 22, shaveDecayInStrike: 5, emberDecay: 30, smallDecay: 11, largeDecay: 14, ropeDecay: 10 },
+};
 
 export const NEST_NEEDED = 3;
 export const SHAVINGS_NEEDED = 100;
+export const SHAVINGS_MIN_CATCH = 35; // below this a spark has nothing to catch on
 export const SMALL_TARGET = 55;
 export const LARGE_TARGET = 100;
 export const ROPE_FLAME_MIN = 68; // flame must be this high to burn the rope
 
 export function initFireState(): FireState {
-  return { stage: 'nest', nestPieces: 0, shavings: 0, emberHealth: 0, flameHeight: 0, ropeBurn: 0, strikes: 0 };
+  return { stage: 'nest', nestPieces: 0, shavings: 0, emberHealth: 0, flameHeight: 0, ropeBurn: 0, strikes: 0, flameOuts: 0 };
 }
 
 export type FireAction =
   | { kind: 'placePiece' }
-  | { kind: 'shave'; quality: number }   // 0..1
+  | { kind: 'shaveHold'; dt: number }    // ms spent shaving this frame
   | { kind: 'strike'; quality: number }  // 0..1 (also encodes the rng roll)
   | { kind: 'blow'; strength: number }   // 0..1
   | { kind: 'addSmall' }
@@ -38,7 +63,12 @@ export type FireAction =
 
 function clamp(v: number, lo = 0, hi = 100) { return Math.max(lo, Math.min(hi, v)); }
 
-export function fireReducer(s: FireState, a: FireAction): FireState {
+// Everything resets except the nest and the rope damage already done.
+function flameOut(s: FireState): FireState {
+  return { ...s, stage: 'shave', shavings: 0, emberHealth: 0, flameHeight: 0, flameOuts: s.flameOuts + 1 };
+}
+
+export function fireReducer(s: FireState, a: FireAction, t: FireTuning): FireState {
   if (s.stage === 'done') return s;
   const perSec = (rate: number, dt: number) => rate * (dt / 1000);
 
@@ -49,18 +79,18 @@ export function fireReducer(s: FireState, a: FireAction): FireState {
       return nestPieces >= NEST_NEEDED ? { ...s, nestPieces, stage: 'shave' } : { ...s, nestPieces };
     }
 
-    case 'shave': {
+    case 'shaveHold': {
       if (s.stage !== 'shave') return s;
-      const shavings = clamp(s.shavings + 10 + a.quality * 14);
+      const shavings = clamp(s.shavings + perSec(t.shaveRate, a.dt));
       return shavings >= SHAVINGS_NEEDED ? { ...s, shavings: 100, stage: 'strike' } : { ...s, shavings };
     }
 
     case 'strike': {
       if (s.stage !== 'strike') return s;
       const strikes = s.strikes + 1;
-      // A clean, fast strike catches a spark.
-      if (a.quality > 0.5) {
-        return { ...s, strikes, emberHealth: 28, stage: 'ember' };
+      // A clean, fast strike catches — but only if enough shavings remain.
+      if (a.quality > t.strikeThreshold && s.shavings >= SHAVINGS_MIN_CATCH) {
+        return { ...s, strikes, emberHealth: clamp(20 + 20 * a.quality), stage: 'ember' };
       }
       return { ...s, strikes };
     }
@@ -99,26 +129,30 @@ export function fireReducer(s: FireState, a: FireAction): FireState {
     case 'tick': {
       const dt = a.dt;
       switch (s.stage) {
+        case 'strike': {
+          // Shavings blow away while you fumble — dawdle long enough and
+          // you're back to shaving.
+          const shavings = clamp(s.shavings - perSec(t.shaveDecayInStrike, dt));
+          if (shavings <= 0) return { ...s, shavings: 0, stage: 'shave' };
+          return { ...s, shavings };
+        }
         case 'ember': {
-          const emberHealth = clamp(s.emberHealth - perSec(26, dt));
-          if (emberHealth <= 0) {
-            // Ember died — back to striking, but keep most shavings.
-            return { ...s, emberHealth: 0, shavings: 60, stage: 'strike' };
-          }
+          const emberHealth = clamp(s.emberHealth - perSec(t.emberDecay, dt));
+          if (emberHealth <= 0) return flameOut(s);
           return { ...s, emberHealth };
         }
         case 'smallSticks': {
-          const flameHeight = clamp(s.flameHeight - perSec(8, dt));
-          if (flameHeight <= 0) return { ...s, flameHeight: 0, emberHealth: 20, stage: 'ember' };
+          const flameHeight = clamp(s.flameHeight - perSec(t.smallDecay, dt));
+          if (flameHeight <= 0) return flameOut(s);
           return { ...s, flameHeight };
         }
         case 'largeSticks': {
-          const flameHeight = clamp(s.flameHeight - perSec(11, dt));
+          const flameHeight = clamp(s.flameHeight - perSec(t.largeDecay, dt));
           if (flameHeight <= SMALL_TARGET - 25) return { ...s, flameHeight, stage: 'smallSticks' };
           return { ...s, flameHeight };
         }
         case 'ropeBurn': {
-          const flameHeight = clamp(s.flameHeight - perSec(9, dt));
+          const flameHeight = clamp(s.flameHeight - perSec(t.ropeDecay, dt));
           const ropeBurn = clamp(
             s.ropeBurn + (s.flameHeight >= ROPE_FLAME_MIN ? perSec(24, dt) : -perSec(6, dt)),
           );
